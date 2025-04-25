@@ -1,118 +1,78 @@
+import src.algs as algs
 import numpy as np
 import pandas as pd
-import scipy.stats as st
-from causallearn.search.ScoreBased.GES import ges
-from causallearn.search.ConstraintBased.PC import pc
-import itertools
-from sklearn.preprocessing import StandardScaler
-from dagma.nonlinear import DagmaMLP, DagmaNonlinear
-from dagma.linear import DagmaLinear
-from castle.algorithms import NotearsNonlinear, DAG_GNN
-from notears.notears.nonlinear import NotearsMLP, notears_nonlinear
-from cd_v_partition.causal_discovery import ges_local_learn
-import torch
-import os
+import pickle
+from cd_v_partition.fusion import screen_projections
+from concurrent.futures import ProcessPoolExecutor
+import networkx as nx
 import time
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "4"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+doses = ["A", "B", "C", "D", "E"]
+cd_algs = [("dag_gnn", algs.dag_gnn_local_learn),
+            ("ges_non_param_tetrad", algs.ges_non_param_tetrad_local_learn),
+            ("pc_kci_tetrad", algs.pc_kci_tetrad_local_learn),
+            ("ges_bic_tetrad", algs.ges_bic_tetrad_local_learn),
+            ("pc_fisherz_tetrad", algs.pc_fisherz_tetrad_local_learn)]
 
-df = pd.read_csv("data/huvec/cd_matrix_dA.csv")
-df_gene_expression = df.drop(columns=["radiation"])
-num_genes = len(df_gene_expression.columns)
-df_gene_expression = StandardScaler().fit_transform(df_gene_expression)
-df_gene_expression = pd.DataFrame(data=df_gene_expression)
-df_learn = pd.DataFrame(data=df_gene_expression)
-df_learn['radiation'] = df['radiation']
+def partition_problem(partition: dict, data: pd.DataFrame):
+    sub_problems = []
+    k = list(partition.keys())
+    k.sort()
+    for i in k:
+        sub_nodes = partition[i]
+        sub_nodes = list(sub_nodes)
+        sub_data = data[sub_nodes] 
+        sub_problems.append(sub_data)
+    return sub_problems
+def run_cd_partition():
+    for dose in doses:
+        for cd_name, cd in cd_algs:
+            print(f'Running {cd_name} for dose {dose}')
+            start = time.time()
+            # Load gene epxression 
+            df = pd.read_csv(f"data/huvec/cd_matrix_d{dose}.csv")
+            
+            # Load curated partition, add radiation to each subset
+            with open(f"./data/huvec/cd_partition_d{dose}_new.pickle", 'rb') as f:
+                custom_partition = pickle.load(f)
+            for i, comm in custom_partition.items():
+                comm += ['radiation']
+            subproblems = partition_problem(custom_partition, df)
+            
+            # Locally learn over partition
+            n_comms = len(custom_partition)
+            nthreads = n_comms  # each thread handles one partition
+            results = []
+            chunksize = max(1, n_comms // nthreads)
+            with ProcessPoolExecutor(max_workers=nthreads) as executor:
+                for result in executor.map(cd, subproblems, chunksize=chunksize):
+                    results.append(result)
 
-def dagma_nonlinear_local_learn(subproblem, use_skel):
-    skel, data = subproblem
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    d = data.shape[1]
-    X = data.values
-    X_tensor = torch.from_numpy(X).type(torch.double).to(device)
-    eq_model = DagmaMLP(dims=[d, np.min([10, d-1]), 1], bias=True, dtype=torch.double) # create the model for the structural equations, in this case MLPs
-    eq_model = eq_model.to(device)
-    model = DagmaNonlinear(eq_model, dtype=torch.double) # create the model for DAG learning
-    # adj = model.fit(X_tensor, lambda1=0.02, lambda2=0.005) # fit the model with L1 reg. (coeff. 0.02) and L2 reg. (coeff. 0.005)
-    adj = model.fit(X_tensor, lambda1=0.001, lambda2=0.0001) # fit the model with L1 reg. (coeff. 0.02) and L2 reg. (coeff. 0.005)
+            # Create global graph 
+            num_genes = len(df.columns) - 1
+            superstructure = np.ones((num_genes+1, num_genes+1))
+            global_net_non_param = screen_projections(superstructure, custom_partition, results, ss_subset=False, finite_lim=False, data=df.to_numpy())
 
-    return adj
+            nx.write_gexf(global_net_non_param, f"./data/huvec/cd_{cd_name}_d{dose}.gexf")
+            print(f'Done running {cd_name} for dose {dose} in {time.time() - start}(s)')
+            
+def run_cd_no_partition():
+    for dose in doses:
+        for cd_name, cd in cd_algs:
+            print(f'Running {cd_name} for dose {dose}')
+            start = time.time()
+            # Load gene epxression 
+            df = pd.read_csv(f"data/huvec/cd_matrix_d{dose}.csv")        
+            ground_truth = nx.read_gexf(f"./data/huvec/cd_subgraph_d{dose}.gexf" )
+            
+            global_adj = cd([None, df[list(ground_truth.nodes)+['radiation']]], use_skel=False)
+            global_net = nx.from_numpy_array(global_adj, create_using=nx.DiGraph)
+            global_net = nx.relabel_nodes(global_net, dict(zip(np.arange(len(global_net.nodes)), list(ground_truth.nodes)+['radiation'])))
 
-def ges_non_param_local_learn(subproblem, use_skel):
-    skel, data = subproblem
-    data = data.drop(columns=['target'])
-    print(data.columns)
-    result = ges(data.values, maxP=10, node_names=data.columns, score_func="local_score_CV_general")
-    return result
-def pc_kci_local_learn(subproblem, use_skel):
-    skel, data = subproblem
-    data = data.drop(columns=['target'])
-    result = pc(data.values, alpha=0.05, indep_test='fastkci')
-    return result
-def dag_gnn_local_learn(subproblem, use_skel):
-    skel, data = subproblem
-    d = data.shape[1]
-    X = data.values
-    model = DAG_GNN(device_type="gpu")
-    model.learn(X)
-    return model.causal_matrix
-    
-def notears_mlp_local_learn(subproblem, use_skel):
-    skel, data = subproblem
-    d = data.shape[1]
-    X = data.values
-    model = NotearsMLP(dims=[d, 10, 1], bias=True)
-    adj = notears_nonlinear(model, X, lambda1=0.01, lambda2=0.01)
-    return adj
+            nx.write_gexf(global_net, f"./data/huvec/cd_{cd_name}_d{dose}_np.gexf")
+            print(f'Done running {cd_name} for dose {dose} in {time.time() - start}(s)')
 
-
-#global_adj = ges_local_learn([superstructure, df_learn], use_skel=True)
-start = time.time()
-global_adj_dagma = dagma_nonlinear_local_learn([None, df_learn], use_skel=False)
-print(f"DAGMA took {time.time() - start}(s) and learned {np.sum(global_adj_dagma!=0)} edges")
-
-start = time.time()
-global_adj_gnn = dag_gnn_local_learn([None, df_learn], use_skel=False)
-print(f"DAG-GNN took {time.time() - start}(s) and learned {np.sum(global_adj_gnn!=0)} edges")
-
-start = time.time()
-global_adj_notears = notears_mlp_local_learn([None, df_learn], use_skel=False)
-print(f"NOTEARS took {time.time() - start}(s) and learned {np.sum(global_adj_notears!=0)} edges")
-
-
-# Correlation matrix with Permutation testing
-# df_gene_expression = df.drop(columns=["radiation"])
-# num_genes = len(df_gene_expression.columns)
-# df_gene_expression = StandardScaler().fit_transform(df_gene_expression)
-# df_gene_expression = pd.DataFrame(data=df_gene_expression)
-# corr_mat = df_gene_expression.corr('pearson', numeric_only=True).to_numpy()
-# print(np.min(np.abs(corr_mat)))
-# np.fill_diagonal(corr_mat, 0)
-# print(np.max(corr_mat), np.argmax(corr_mat))
-# random_corr_coef = []
-# for i in range(10):
-#     shuffled_array = df_gene_expression.values
-#     [np.random.shuffle(x) for x in shuffled_array]
-#     shuffled_final_data_set = pd.DataFrame(data=shuffled_array)
-#     shuffle_corr_mat = shuffled_final_data_set.corr('pearson', numeric_only=True).to_numpy()
-#     np.fill_diagonal(shuffle_corr_mat, 0)
-#     print(np.max(shuffle_corr_mat), np.argmax(shuffle_corr_mat))
-#     random_corr_coef.append(np.max(shuffle_corr_mat))
-# print(random_corr_coef)
-# ci_interval = st.t.interval(0.95, len(random_corr_coef)-1, 
-#                             loc=np.mean(random_corr_coef), 
-#                             scale=st.sem(random_corr_coef))
-# print(ci_interval)
-# cutoff = ci_interval[1]
-
-# corr_mat[corr_mat<=cutoff] = 0
-# corr_mat[corr_mat>cutoff] = 1
-# print(f"Superstructure contains {np.sum(corr_mat)} edges which is \
-#         {np.sum(corr_mat)/(corr_mat.shape[1]**2)} fraction of all possible edges")
-
-# skeleton = [(i,j) for (i,j) in itertools.product(range(num_genes), range(num_genes)) if corr_mat[i,j] ==1]
-# skeleton += [(num_genes,i) for i in range(num_genes)]
-# print(len(skeleton))
-# # This implementation of GES is painfully slow, the graph operations (converting a DAG to a PDAG take forever for large graphs)
-# result = ges(StandardScaler().fit_transform(X), maxP=10, score_func="local_score_CV_general", skeleton=skeleton)
+            
+if __name__ == "__main__":
+    run_cd_partition()
+    run_cd_no_partition()
