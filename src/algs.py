@@ -5,6 +5,7 @@ from causallearn.search.ConstraintBased.PC import pc
 from dagma.nonlinear import DagmaMLP, DagmaNonlinear
 from castle.algorithms import NotearsNonlinear, DAG_GNN
 from src.GENIE3 import GENIE3
+from src.GENELink.Code.Demo import run_GENELink
 
 os.environ["JAVA_HOME"] = "/homes/shahashka/lucid_cd/amazon-corretto-21.0.7.6.1-linux-x64/lib/"
 import pytetrad.tools.TetradSearch as py_ts
@@ -157,6 +158,7 @@ def dag_gnn_local_learn(data):
 def notears_mlp_local_learn(data):
     d = data.shape[1]
     X = data.values
+    # TODO return weights 
     model = NotearsNonlinear(device_type="gpu")
     adj = model.learn(X)
     return adj
@@ -183,7 +185,8 @@ def pc_fisherz_tetrad_local_learn(data):
 def ges_non_param_tetrad_local_learn(data):
     data = data.astype({col: "float64" for col in data.columns})
     score = Bgs(data)
-    adj = ts.Fges(score).search()
+    graph = ts.Fges(score).search()
+    adj = tr.graph_to_matrix(graph).values
     return adj
 
 def ges_bic_tetrad_local_learn(data):
@@ -198,4 +201,26 @@ def ges_bic_tetrad_local_learn(data):
 def genie3_local_learn(data):
     adj = GENIE3(data.values, nthreads=16)
     return adj
+
+
+def GENELink_local_learn(dose):
+    path = './data/huvec/GENELink_data_files'
+    exp_file = f"{path}/GeneExpression_key_genes_{dose}.csv"
+    tf_file = f"{path}/TF_{dose}.csv"
+    target_file = f"{path}/Target_{dose}.csv"
     
+    train_file = f"{path}/Train_set_{dose}.csv"
+    test_file = f"{path}/Test_set_{dose}.csv"
+    val_file =f"{path}/Validation_set_{dose}.csv"
+
+    out_path = f"{path}/Result_{dose}/"
+    if not os.path.exists(out_path):
+        os.makedirs(out_path)
+    model_path = f"{out_path}model.pkl"
+    tf_embed_path = f'{out_path}/Channel1.csv'
+    target_embed_path = f'{out_path}/Channel2.csv'
+    pred_path = f"{out_path}/pred.csv"
+
+    run_GENELink(exp_file, tf_file, target_file, train_file, 
+                 test_file, val_file, model_path, tf_embed_path, 
+                 target_embed_path, pred_path)
