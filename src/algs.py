@@ -10,7 +10,7 @@ from src.GENELink.Code.Demo import run_GENELink
 os.environ["JAVA_HOME"] = "/homes/shahashka/lucid_cd/amazon-corretto-21.0.7.6.1-linux-x64/lib/"
 import pytetrad.tools.TetradSearch as py_ts
 import torch
-os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import jpype
 from jpype import JImplements, JOverride
@@ -148,10 +148,10 @@ def pc_kci_local_learn(data):
     result = pc(data.values, alpha=0.05, indep_test='kci')
     return result
 
-def dag_gnn_local_learn(data):
+def dag_gnn_local_learn(data, seed):
     d = data.shape[1]
     X = data.values
-    model = DAG_GNN(device_type="gpu")
+    model = DAG_GNN(device_type="gpu", seed=seed)
     model.learn(X)
     return model.causal_matrix
     
