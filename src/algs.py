@@ -6,11 +6,12 @@ from dagma.nonlinear import DagmaMLP, DagmaNonlinear
 from castle.algorithms import NotearsNonlinear, DAG_GNN
 from src.GENIE3 import GENIE3
 from src.GENELink.Code.Demo import run_GENELink
+from src.GENELink.Code.Train_Test_Split import Hard_Negative_Specific_train_test_val
 
 os.environ["JAVA_HOME"] = "/homes/shahashka/lucid_cd/amazon-corretto-21.0.7.6.1-linux-x64/lib/"
 import pytetrad.tools.TetradSearch as py_ts
 import torch
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import jpype
 from jpype import JImplements, JOverride
@@ -124,7 +125,7 @@ class Bgs:
     def defaultScore(self):
         return self
     
-def dagma_nonlinear_local_learn(data):
+def dagma_nonlinear_local_learn(data, seed=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     d = data.shape[1]
     X = data.values
@@ -136,26 +137,26 @@ def dagma_nonlinear_local_learn(data):
     adj = model.fit(X_tensor, lambda1=0.001, lambda2=0.0001) # fit the model with L1 reg. (coeff. 0.02) and L2 reg. (coeff. 0.005)
     return adj
 
-def ges_non_param_local_learn(data):
+def ges_non_param_local_learn(data, seed=None):
     result = ges(data.values, maxP=10, node_names=data.columns, score_func="local_score_CV_general")
     return result
 
-def ges_discrete_poisson_local_learn(data):
+def ges_discrete_poisson_local_learn(data, seed=None):
     result = ges(data.values, maxP=10, node_names=data.columns, score_func="local_score_BDeu")
     return result
 
-def pc_kci_local_learn(data):
+def pc_kci_local_learn(data, seed=None):
     result = pc(data.values, alpha=0.05, indep_test='kci')
     return result
 
 def dag_gnn_local_learn(data, seed):
     d = data.shape[1]
     X = data.values
-    model = DAG_GNN(device_type="gpu", seed=seed)
+    model = DAG_GNN(device_type="gpu", device_ids='1', seed=seed, epochs=50, optimizer='adam')
     model.learn(X)
     return model.causal_matrix
     
-def notears_mlp_local_learn(data):
+def notears_mlp_local_learn(data, seed=None):
     d = data.shape[1]
     X = data.values
     # TODO return weights 
@@ -163,7 +164,7 @@ def notears_mlp_local_learn(data):
     adj = model.learn(X)
     return adj
 
-def pc_kci_tetrad_local_learn(data):
+def pc_kci_tetrad_local_learn(data, seed=None):
     data = data.astype({col: "float64" for col in data.columns})
     search = py_ts.TetradSearch(data)
     search.set_verbose(False)
@@ -172,7 +173,7 @@ def pc_kci_tetrad_local_learn(data):
     adj = search.get_graph_to_matrix().values
     return adj
 
-def pc_fisherz_tetrad_local_learn(data):
+def pc_fisherz_tetrad_local_learn(data, seed=None):
     data = data.astype({col: "float64" for col in data.columns})
     search = py_ts.TetradSearch(data)
     search.set_verbose(False)
@@ -182,45 +183,71 @@ def pc_fisherz_tetrad_local_learn(data):
     adj = search.get_graph_to_matrix().values
     return adj
 
-def ges_non_param_tetrad_local_learn(data):
+def direct_lingam_tetrad_local_learn(data, seed=None):
+    data = data.astype({col: "float64" for col in data.columns})
+    search = py_ts.TetradSearch(data)
+    search.set_verbose(False)
+    search.use_sem_bic()
+    ## Run various algorithms and print their results. For now (for compability with R)
+    search.run_direct_lingam()
+    adj = search.get_graph_to_matrix().values
+    return adj
+
+def ges_non_param_tetrad_local_learn(data, seed=None):
     data = data.astype({col: "float64" for col in data.columns})
     score = Bgs(data)
     graph = ts.Fges(score).search()
     adj = tr.graph_to_matrix(graph).values
     return adj
 
-def ges_bic_tetrad_local_learn(data):
+def ges_bic_tetrad_local_learn(data, seed=None):
     data = data.astype({col: "float64" for col in data.columns})
     search = py_ts.TetradSearch(data)
     search.set_verbose(False)
     search.use_sem_bic()
-    search.run_fges()
+    search.run_fges(parallelized=True)
     adj = search.get_graph_to_matrix().values
     return adj
 
-def genie3_local_learn(data):
-    adj = GENIE3(data.values, nthreads=16)
+def genie3_local_learn(data, celltype, dose, seed=None):
+    tf_file = f"./data/{celltype}/GENELink_data_files/TF_{dose}.csv"
+    tfs = pd.read_csv(tf_file)["Gene"].tolist()
+    tfs = tfs + ['radiation']
+    adj = GENIE3(data.values, gene_names=list(data.columns), regulators=tfs, nthreads=16)
     return adj
 
 
-def GENELink_local_learn(dose):
+def GENELink_local_learn(data, dose, seed=None):
     path = './data/huvec/GENELink_data_files'
-    exp_file = f"{path}/GeneExpression_key_genes_{dose}.csv"
+    #exp_file = f"{path}/GeneExpression_key_genes_{dose}.csv"
     tf_file = f"{path}/TF_{dose}.csv"
     target_file = f"{path}/Target_{dose}.csv"
-    
+
     train_file = f"{path}/Train_set_{dose}.csv"
     test_file = f"{path}/Test_set_{dose}.csv"
     val_file =f"{path}/Validation_set_{dose}.csv"
 
-    out_path = f"{path}/Result_{dose}/"
+    out_path = f"{path}/Result_{dose}{seed}/"
     if not os.path.exists(out_path):
         os.makedirs(out_path)
     model_path = f"{out_path}model.pkl"
     tf_embed_path = f'{out_path}/Channel1.csv'
     target_embed_path = f'{out_path}/Channel2.csv'
     pred_path = f"{out_path}/pred.csv"
+    train_path = f"{out_path}/train.csv"
 
-    run_GENELink(exp_file, tf_file, target_file, train_file, 
+    # train, val, test = Hard_Negative_Specific_train_test_val(label_file=label_file, 
+    #                                                            Gene_file=target_file, 
+    #                                                            tf_file=tf_file,
+    #                                                            ratio=0.67,
+    #                                                            p_val=0.5)
+    # run_GENELink(data, tf_file, target_file, train_file, 
+    #              test_file, val_file, model_path, tf_embed_path, 
+    #              target_embed_path, pred_path, load_from_file=False, test_full_matrix=True)
+    run_GENELink(data, tf_file, target_file, train_file, 
                  test_file, val_file, model_path, tf_embed_path, 
-                 target_embed_path, pred_path)
+                 target_embed_path, pred_path=pred_path, load_from_file=False, test_full_matrix=True, train_path=train_path)
+    # run_GENELink(data, tf_file, target_file, train_file, 
+    #              test_file, val_file, model_path, tf_embed_path, 
+    #              target_embed_path, pred_path, load_from_file=False, 
+    #              test_full_matrix=True, train_path=train_path, w_rad=True)
