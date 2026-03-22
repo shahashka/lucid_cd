@@ -1,5 +1,7 @@
 # To quantify separability, train classifiers to predict dose rate 
 # and week using different feature selections
+from cProfile import label
+from tkinter import YES
 from typing import Any
 from sklearn.model_selection import StratifiedKFold, KFold, train_test_split
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler, LabelEncoder, OneHotEncoder
@@ -41,6 +43,7 @@ MODELS = {
     "logistic_regression": LogisticRegression(penalty="l1", solver="saga", max_iter=30000),
     "svc_rbf": SVC(kernel="rbf", max_iter=30000),
     "svc_linear": LinearSVC(penalty="l1", max_iter=30000),
+    "elastic_multitask": MultiTaskElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=30000)
 }
 PHENOTYPE_MODEL = { 'elastic': ElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=30000), "elastic_multitask" : MultiTaskElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=30000)}
 CAUSAL_DOSE_RATES = ["F", "G", "H", "I", "J"]
@@ -157,6 +160,12 @@ def model_fit(X,y, model, holdout, genes=None):
         X = X[genes_filtered]
         X_eval = X_eval[genes_filtered]
     n_splits = 4
+    if model==MODELS["elastic_multitask"]: # only model that requires one hot y's
+        # One-hot encode targets so each class is a separate task
+        enc = OneHotEncoder()
+        y = enc.fit_transform(y.reshape(-1, 1)).toarray()
+        y_eval = enc.transform(y_eval.reshape(-1, 1)).toarray()
+
     if model == PHENOTYPE_MODEL['elastic']:
         kfold = KFold(n_splits=4, random_state=42, shuffle=True)
     else:
@@ -645,7 +654,7 @@ def run_increasing_num_genes(X, labels, phenotypes, holdout):
                     except Exception as e:
                         print(f"[run_increasing_num_genes] {method} n={num_genes}: {e}")
                         continue
-                    mean_acc, std_acc, score = model_fit(X, y, clone(model), genes=genes, holdout=(holdout["X"], holdout["phenotype"]['area_diff'].to_numpy().ravel()))
+                    mean_acc, std_acc, score = model_fit(X, y, clone(model), genes=genes, holdout=(holdout["X"], holdout["y"][label_name]))
                     rows.append({
                         "num_genes": num_genes,
                         "feature_selection": method,
@@ -663,7 +672,7 @@ def run_increasing_num_genes(X, labels, phenotypes, holdout):
             for p_label in list(phenotypes.columns):
                 y_p = phenotypes[p_label].to_numpy().ravel()
                 y_p_holdout = holdout['phenotype'][p_label].to_numpy().ravel()
-                mean_acc, std_acc, score = model_fit(X, y_p, PHENOTYPE_MODEL["elastic"], genes=genes, holdout=(holdout["X"], y_p_holdout))
+                mean_acc, std_acc, score = model_fit(X, y_p, clone(PHENOTYPE_MODEL["elastic"]), genes=genes, holdout=(holdout["X"], y_p_holdout))
                 rows.append({
                     "num_genes": num_genes,
                     "feature_selection": method,
@@ -728,7 +737,7 @@ def plot_increasing_num_genes(df, out_prefix="increasing_num_genes"):
             plt.close()
             print(f"[plot_increasing_num_genes] Saved {safe_name}")
 
-def multi_task_elastic_net(X, y_dr, y_w, out_path: str = "multi_task_elastic_net_coefs.pkl"):
+def multi_task_elastic_net(X, y_dr, y_w, holdout = None, out_path: str = "multi_task_elastic_net_coefs.pkl"):
     """
     Fit MultiTaskElasticNet models for dose-rate and week (time),
     and save:
@@ -741,11 +750,11 @@ def multi_task_elastic_net(X, y_dr, y_w, out_path: str = "multi_task_elastic_net
     y_w_arr = np.ravel(y_w)
 
     # One-hot encode targets so each class is a separate task
-    enc_dr = OneHotEncoder(sparse=False)
-    y_dr_one_hot = enc_dr.fit_transform(y_dr_arr.reshape(-1, 1))
+    enc_dr = OneHotEncoder()
+    y_dr_one_hot = enc_dr.fit_transform(y_dr_arr.reshape(-1, 1)).toarray()
 
-    enc_w = OneHotEncoder(sparse=False)
-    y_w_one_hot = enc_w.fit_transform(y_w_arr.reshape(-1, 1))
+    enc_w = OneHotEncoder()
+    y_w_one_hot = enc_w.fit_transform(y_w_arr.reshape(-1, 1)).toarray()
 
     # Dose-rate multitask model
     model_dr = clone(PHENOTYPE_MODEL["elastic_multitask"])
@@ -754,6 +763,9 @@ def multi_task_elastic_net(X, y_dr, y_w, out_path: str = "multi_task_elastic_net
     # Week/time multitask model
     model_w = clone(PHENOTYPE_MODEL["elastic_multitask"])
     model_w.fit(X, y_w_one_hot)
+    if holdout:
+        print(model_dr.score(holdout["X"], enc_dr.transform(holdout["y"]["dose_rate"].reshape(-1, 1)).toarray()))
+        print(model_w.score(holdout["X"], enc_w.transform(holdout["y"]["week"].reshape(-1, 1)).toarray()))
 
     # Package everything with explicit ordering information
     result = {
@@ -911,7 +923,7 @@ if __name__ == "__main__":
                         genes_filtered = X.columns
                     else:
                         genes_filtered = list(set(genes).intersection(set(X.columns)))
-                    mean, std, score = model_fit(X, y, model, genes=genes,holdout=(X_holdout, labels_holdout[label_name]))
+                    mean, std, score = model_fit(X, y, clone(model), genes=genes,holdout=(X_holdout, labels_holdout[label_name]))
                     all_scores[model_name][label_name][feat_name] = {
                         "mean": float(mean),
                         "std": float(std),
@@ -944,8 +956,9 @@ if __name__ == "__main__":
         plot_increasing_num_genes(df_rig)
         
     for top in TOP_PERFORMERS:
+        print(top)
         genes_filtered = list(set(feature_sets[top]).intersection(set(X.columns)))
-        multi_task_elastic_net(X,y_dr,y_w, out_path=f"multi_task_elastic_net_coefs_{top}.pkl")
+        multi_task_elastic_net(X[genes_filtered],y_dr,y_w, out_path=f"multi_task_elastic_net_coefs_{top}.pkl", holdout={"X":X_holdout[genes_filtered], "y": labels_holdout})
     # Analyze causal graphs
     # for name, file in GRAPHS.items():
     #     print(name)
