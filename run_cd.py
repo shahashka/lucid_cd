@@ -10,6 +10,8 @@ import networkx as nx
 import time
 import os
 from tqdm import tqdm
+from sklearn.preprocessing import StandardScaler
+
 from src.GENELink.Code.Train_Test_Split import Hard_Negative_Specific_train_test_val
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 celltype = "rpe1_experiment2" #"huvec" 
@@ -96,7 +98,7 @@ def run_cd_partition(filter_by_variance = False, bootstrap=False):
             #     mapping=dict(zip(np.arange(len(node_ids)), node_ids)),
             #     copy=True,
             # )
-            file_path = f"./data/{celltype}/bootstrap_graphs2/cd_{cd_name}_d{dose}.gexf" #if bootstrap else f"./data/{celltype}/cd_{cd_name}_d{dose}.gexf"
+            # file_path = f"./data/{celltype}/bootstrap_graphs2/cd_{cd_name}_d{dose}.gexf" #if bootstrap else f"./data/{celltype}/cd_{cd_name}_d{dose}.gexf"
             #nx.write_gexf(global_net_non_param, file_path)
             print(f'Done running {cd_name} for dose {dose} in {time.time() - start}(s)')
             
@@ -181,9 +183,11 @@ def boot_func(i, X, cd, celltype, cd_name, threshold, dose, part):
     if cd == algs.genie3_local_learn:
         A_boot = cd(X_boot, celltype, dose, i)
     else:
+        X_arr = StandardScaler().fit_transform(X_boot)
+        X_boot = pd.DataFrame(X_arr, columns=X_boot.columns)
         A_boot = cd(X_boot, i)
     edge_counts = (np.abs(A_boot) > threshold).astype(int)
-    np.save(f"./data/{celltype}/bootstrap_graphs3/{cd_name}_dose_{dose}_part_{part}_boot_{i}.npy", A_boot)
+    np.save(f"./data/{celltype}/bootstrap_graphs4/{cd_name}_dose_{dose}_part_{part}_boot_{i}.npy", A_boot)
     return A_boot,edge_counts
 
 def bootstrap_cd(part,cd_name, cd, X, dose, n_bootstraps=20, threshold=0.3):

@@ -9,7 +9,7 @@ from sklearn.svm import SVC, LinearSVC
 from sklearn.linear_model import LogisticRegression, Lasso, ElasticNet
 from sklearn.feature_selection import VarianceThreshold, RFECV, RFE
 from sklearn.base import clone
-
+from sklearn.metrics import accuracy_score
 import numpy as np
 import pandas as pd
 import pickle
@@ -29,7 +29,7 @@ def parse_arguments(args=None):
     Creates the argument parser and defines command-line arguments.
     """
     parser = argparse.ArgumentParser(description="A simple command-line utility.")
-    parser.add_argument("--only_landscape", "-ol", default=False, action="store_true", help="Only run the causal landscape code")
+    parser.add_argument("--plot_only", "-po", default=False, action="store_true", help="Only run plotting from saved files")
     parser.add_argument("--normalize", "-n", default=False, action="store_true", help="Normalize the log2fold dataset")
     parser.add_argument("--prune_log2fold", "-p", default=False, action="store_true", help="Prune the log2fold dataset")
     parser.add_argument("--run_increasing_genes", "-rig", default=False, action="store_true", help="Run run_increasing_num_genes and save accuracies to CSV")
@@ -41,8 +41,9 @@ with open("/homes/shahashka/lucid_cd/data/gene_groups.pkl", "rb") as f:
     CAUSAL_TFS, CAUSAL_NEIGHBORHOODS, KOSMOS, CHATGPT, BNL = pickle.load(f)
 MODELS = {
     "logistic_regression": LogisticRegression(penalty="l1", solver="saga", max_iter=30000),
-    "svc_rbf": SVC(kernel="rbf", max_iter=30000),
+    # "svc_rbf": SVC(kernel="rbf", max_iter=30000),
     "svc_linear": LinearSVC(penalty="l1", max_iter=30000),
+    "logistic_regression_elastic": LogisticRegression(penalty="elasticnet", l1_ratio=0.5,solver="saga", max_iter=30000),
     "elastic_multitask": MultiTaskElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=30000)
 }
 PHENOTYPE_MODEL = { 'elastic': ElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=30000), "elastic_multitask" : MultiTaskElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=30000)}
@@ -57,7 +58,9 @@ GRAPHS = {"invariant": "/homes/shahashka/lucid_cd/data/rpe1_experiment2/bootstra
           "I":"/homes/shahashka/lucid_cd/data/rpe1_experiment2/bootstrap_graphs2/dag_gnn_full_doseI.gexf",
           "J":"/homes/shahashka/lucid_cd/data/rpe1_experiment2/bootstrap_graphs2/dag_gnn_full_doseJ.gexf" 
           }
-TOP_PERFORMERS = ["ai_kosmos", "causal_H", "causal_I", "causal_intersections_H_I"]
+TOP_PERFORMERS = ["ai_kosmos", "ai_chatgpt", "causal_H", "causal_I", "causal_intersections_H_I", 
+                  "causal_intersections_H_J", "causal_J" ]
+                #   "causal_tf_J", "causal_tf_H", "causal_tf_I"]
 
 # Helper to get children / successors in a graph-agnostic way
 def _children(g, node):
@@ -104,7 +107,7 @@ def create_k_hop_neighbors(feature_selection_method):
     return candidates
 
 # Sample a set of genes from the data based on the feature selection method
-def sample_features(num_genes, feature_selection_method, X, y, y_name, cached_data=dict()):
+def sample_features(num_genes, feature_selection_method, X, y, y_name,cached_data=dict()):
     rng = np.random.default_rng(42)
     if feature_selection_method == "random":
         selected = random(X, size=min(num_genes, X.shape[1]))
@@ -128,7 +131,7 @@ def sample_features(num_genes, feature_selection_method, X, y, y_name, cached_da
     elif feature_selection_method == "ai_kosmos":
         selected = ai_features("kosmos")
         if len(selected) > num_genes:
-            selected = list(rng.choice(selected, size=num_genes, replace=False))
+            selected = list[Any](rng.choice(selected, size=num_genes, replace=False))
     elif feature_selection_method == "ai_chatgpt":
         selected = ai_features("chatgpt")
         if len(selected) > num_genes:
@@ -153,20 +156,21 @@ def sample_features(num_genes, feature_selection_method, X, y, y_name, cached_da
         raise ValueError(f"Unknown feature selection method: {feature_selection_method}")
     return selected, cached_data
 
-def model_fit(X,y, model, holdout, genes=None):
+def model_fit(X,y, model, holdout, model_name, genes=None):
     X_eval, y_eval = holdout
     if genes is not None:
         genes_filtered = list(set(genes).intersection(set(X.columns)))
         X = X[genes_filtered]
         X_eval = X_eval[genes_filtered]
     n_splits = 4
-    if model==MODELS["elastic_multitask"]: # only model that requires one hot y's
+    encode = model_name == 'elastic_multitask'
+    if encode: # only model that requires one hot y's
         # One-hot encode targets so each class is a separate task
         enc = OneHotEncoder()
-        y = enc.fit_transform(y.reshape(-1, 1)).toarray()
-        y_eval = enc.transform(y_eval.reshape(-1, 1)).toarray()
-
-    if model == PHENOTYPE_MODEL['elastic']:
+        y_enc = enc.fit_transform(y.reshape(-1, 1)).toarray()
+        y_eval_enc = enc.transform(y_eval.reshape(-1, 1)).toarray()
+    
+    if model_name == "elastic":
         kfold = KFold(n_splits=4, random_state=42, shuffle=True)
     else:
         kfold = StratifiedKFold(n_splits=n_splits, random_state=42, shuffle=True)
@@ -174,14 +178,23 @@ def model_fit(X,y, model, holdout, genes=None):
 
     for i, (train_index, test_index) in enumerate(kfold.split(X, y)):
         X_train = X.loc[train_index]
-        y_train = y[train_index]
+        y_train = y_enc[train_index] if encode else y[train_index]
         X_test = X.loc[test_index]
-        y_test = y[test_index]
+        y_test = y_enc[test_index] if encode else y[test_index]
         model.fit(X_train, y_train)
         scores.append(model.score(X_test, y_test))
     mean, std = np.mean(scores), np.std(scores)
-    score = model.score(X_eval, y_eval)
-    return mean, std, score
+    score =  model.score(X_eval, y_eval_enc)if encode else model.score(X_eval, y_eval)
+    fitted = (model, enc) if encode else model
+    return mean, std, score, fitted
+
+def load_data_tpm():
+    df = pd.read_csv("/homes/shahashka/lucid_cd/data/rpe1_experiment2/cd_tpm_matrix_combined_dose_rate.csv", header=0)
+    dose_rate = np.array([0.4 if (d==0.004) or (d==0.04) else d for d in df['dose_rate'] ])
+    labels_dr = OrdinalEncoder().fit_transform(dose_rate.reshape(-1,1))
+    labels_w = df['week']
+    X = df.drop(columns=["dose_rate", "week"])
+    return X, labels_dr, labels_w
 
 def load_data(args):
     log2fold_df = pd.read_csv(f"/homes/shahashka/lucid_cd/data/rpe1_experiment2/rpe1_9week_study_experiment2_diffexp_deseq_vs_control_all_dG_W2_adjust.txt", sep="\t")
@@ -265,7 +278,7 @@ def _remove_labels(X):
         X = X.drop(columns=["week"])
     return X
 
-def variance_thresholding(X, threshold=0.05):
+def variance_thresholding(X, threshold=0.1):
     X = _remove_labels(X)
     sel = VarianceThreshold(threshold=threshold)
     sel.fit(X)
@@ -466,7 +479,8 @@ def sparse_features(X, y, n_features=1000):
 #     )
 #     return df
 
-def plot_scores(all_scores):
+
+def plot_scores(all_scores, norm):
     """
     For each model, create a barplot that compares week and dose-rate
     prediction accuracy for each feature-selection method. Also draw
@@ -498,11 +512,16 @@ def plot_scores(all_scores):
         pivot_std = df.pivot(index="feature", columns="label", values="std")
         pivot_score = df.pivot(index="feature", columns="label", values="score")
 
-        # Order methods by "closeness" to Pareto front:
-        # larger average of (week, dose_rate) first
+        # Order methods by "closeness" to Pareto front using euclidean distance from (0,0)
         if {"week", "dose_rate"}.issubset(pivot.columns):
-            pivot = pivot.assign(_score=(pivot["week"] + pivot["dose_rate"]) / 2.0)
+            pivot = pivot.assign(_score=(np.sqrt(pivot["week"]**2 + pivot["dose_rate"])**2))
             pivot = pivot.sort_values(by="_score", ascending=False).drop(columns="_score")
+            pivot_score = pivot_score.assign(_score=(np.sqrt(pivot_score["week"]**2 + pivot_score["dose_rate"])**2))
+            pivot_score = pivot_score.sort_values(by="_score", ascending=False).drop(columns="_score")
+
+        top_performers = list(pivot.head(10).iloc[0:10].index)
+        print(model_name)
+        print(pivot_score.head(10))
 
         # Map feature -> n_genes (take one entry per feature)
         n_genes_map = (
@@ -516,12 +535,12 @@ def plot_scores(all_scores):
         baseline_dr = model_scores["dose_rate"]["all_genes"]["mean"]
 
         # Sort features for a consistent x-axis (optionally put all_genes first)
-        pivot = pivot.sort_index()
-        if "all_genes" in pivot.index:
-            pivot = pivot.reindex(
-                ["all_genes"]
-                + [f for f in pivot.index if f != "all_genes"]
-            )
+        # pivot = pivot.sort_index()
+        # if "all_genes" in pivot.index:
+        #     pivot = pivot.reindex(
+        #         ["all_genes"]
+        #         + [f for f in pivot.index if f != "all_genes"]
+        #     )
 
         # --- Bar plot: week vs dose_rate by feature set ---
         ax = pivot.plot(
@@ -548,12 +567,19 @@ def plot_scores(all_scores):
 
         ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
         plt.tight_layout()
-        plt.savefig(f"{model_name}_feature_selection_barplot_norm.png")
+        if norm:
+            plt.savefig(f"./features/{model_name}_feature_selection_barplot_norm.png")
+        else:
+            plt.savefig(f"./features/{model_name}_feature_selection_barplot.png")
         plt.close()
         
 
         # --- Scatter plot: Pareto-style week vs dose_rate ---
-        fig, (ax1, ax2) = plt.subplots(2,figsize=(14, 12))
+        fig, (ax1, ax2) = plt.subplots(
+            2,
+            figsize=(15, 12),
+            gridspec_kw={"hspace": 0.12},
+        )
 
         # Color each feature set differently using a continuous viridis colormap
         cmap = plt.get_cmap("viridis")
@@ -586,7 +612,9 @@ def plot_scores(all_scores):
             # Distinct marker per point, cycling through marker list
             marker = marker_cycle[idx % len(marker_cycle)]
             size = 60 if feature_name == "all_genes" else 50
-
+            alpha = 0.3
+            if feature_name in top_performers:
+                alpha=1
             ax1.scatter(
                 row["week"],
                 row["dose_rate"],
@@ -594,8 +622,9 @@ def plot_scores(all_scores):
                 color=color,
                 marker=marker,
                 label=label,
+                alpha=alpha
             )
-            row_holdout = pivot_score[feature_name]
+            row_holdout = pivot_score.loc[feature_name]
             ax2.scatter(
                 row_holdout["week"],
                 row_holdout["dose_rate"],
@@ -603,6 +632,7 @@ def plot_scores(all_scores):
                 color=color,
                 marker=marker,
                 label=label,
+                alpha=alpha
             )
 
 
@@ -619,8 +649,11 @@ def plot_scores(all_scores):
         )
 
 
-        plt.tight_layout()
-        plt.savefig(f"{model_name}_pareto_front.png", bbox_inches="tight")
+        fig.tight_layout(h_pad=0.35)
+        if norm:
+            plt.savefig(f"./features/{model_name}_pareto_front_norm.png", bbox_inches="tight")
+        else:
+            plt.savefig(f"./features/{model_name}_pareto_front.png", bbox_inches="tight")
         plt.close()
 
 GENE_RANGE = [10, 20, 30, 50, 100, 200, 400, 600, 800]
@@ -630,12 +663,7 @@ INCREASING_NUM_GENES_METHODS = [
     "variance",
     "recursive",
     "sparse",
-    "ai_kosmos",
-    "ai_chatgpt",
-    "causal_H",
-    "causal_I",
-    "causal_intersections_H_I",
-]
+] + TOP_PERFORMERS
 
 
 def run_increasing_num_genes(X, labels, phenotypes, holdout):
@@ -654,7 +682,7 @@ def run_increasing_num_genes(X, labels, phenotypes, holdout):
                     except Exception as e:
                         print(f"[run_increasing_num_genes] {method} n={num_genes}: {e}")
                         continue
-                    mean_acc, std_acc, score = model_fit(X, y, clone(model), genes=genes, holdout=(holdout["X"], holdout["y"][label_name]))
+                    mean_acc, std_acc, score, _ = model_fit(X, y, clone(model), model_name=model_name, genes=genes, holdout=(holdout["X"], holdout["y"][label_name]))
                     rows.append({
                         "num_genes": num_genes,
                         "feature_selection": method,
@@ -669,10 +697,11 @@ def run_increasing_num_genes(X, labels, phenotypes, holdout):
                         f"num_genes={num_genes} | {method} | {model_name} | {label_name}: "
                         f"train_accuracy={mean_acc:.3f} ± {std_acc:.3f} (n_genes={len(genes)}) | holdout_accuracy={score:.3f}"
                     )
+                        
             for p_label in list(phenotypes.columns):
                 y_p = phenotypes[p_label].to_numpy().ravel()
                 y_p_holdout = holdout['phenotype'][p_label].to_numpy().ravel()
-                mean_acc, std_acc, score = model_fit(X, y_p, clone(PHENOTYPE_MODEL["elastic"]), genes=genes, holdout=(holdout["X"], y_p_holdout))
+                mean_acc, std_acc, score, _ = model_fit(X, y_p, clone(PHENOTYPE_MODEL["elastic"]),model_name="elastic", genes=genes, holdout=(holdout["X"], y_p_holdout))
                 rows.append({
                     "num_genes": num_genes,
                     "feature_selection": method,
@@ -689,7 +718,7 @@ def run_increasing_num_genes(X, labels, phenotypes, holdout):
                 )
 
     df = pd.DataFrame(rows)
-    out_csv = "increasing_num_genes_accuracy.csv"
+    out_csv = "./features/increasing_num_genes_accuracy.csv"
     df.to_csv(out_csv, index=False)
     print(f"[run_increasing_num_genes] Saved {len(df)} rows to {out_csv}")
     return df
@@ -724,6 +753,7 @@ def plot_increasing_num_genes(df, out_prefix="increasing_num_genes"):
                     x, y,
                     label=method, marker="o", markersize=4,
                 )
+            # ax.set_xscale("log")
             ax.set_xlabel("Number of genes")
             ax.set_ylabel("Accuracy")
             ax.set_title(f"Model: {model_name} — Label: {label_name}")
@@ -732,10 +762,24 @@ def plot_increasing_num_genes(df, out_prefix="increasing_num_genes"):
             ax.grid(True, alpha=0.3)
             ax.set_ylim(0, 1.05)
             plt.tight_layout()
-            safe_name = f"{out_prefix}_{model_name}_{label_name}_holdout.png"
+            safe_name = f"./features/{out_prefix}_{model_name}_{label_name}_holdout.png"
             plt.savefig(safe_name, bbox_inches="tight")
             plt.close()
             print(f"[plot_increasing_num_genes] Saved {safe_name}")
+
+def logistic_regression_elastic(X, y_dr, y_w, holdout = None):
+    # Ensure y are 1D arrays
+    y_dr_arr = np.ravel(y_dr)
+    y_w_arr = np.ravel(y_w)
+    model_dr = clone(MODELS["logistic_regression_elastic"])
+    model_dr.fit(X, y_dr_arr)
+    
+    model_w = clone(MODELS["logistic_regression_elastic"])
+    model_w.fit(X, y_w_arr)
+    
+    if holdout:
+        print(model_dr.score(holdout["X"], holdout["y"]["dose_rate"]))
+        print(model_w.score(holdout["X"], holdout["y"]["week"]))
 
 def multi_task_elastic_net(X, y_dr, y_w, holdout = None, out_path: str = "multi_task_elastic_net_coefs.pkl"):
     """
@@ -764,8 +808,14 @@ def multi_task_elastic_net(X, y_dr, y_w, holdout = None, out_path: str = "multi_
     model_w = clone(PHENOTYPE_MODEL["elastic_multitask"])
     model_w.fit(X, y_w_one_hot)
     if holdout:
-        print(model_dr.score(holdout["X"], enc_dr.transform(holdout["y"]["dose_rate"].reshape(-1, 1)).toarray()))
-        print(model_w.score(holdout["X"], enc_w.transform(holdout["y"]["week"].reshape(-1, 1)).toarray()))
+        y_pred_dr = model_dr.predict(holdout["X"]).argmax(axis=1)
+        y_pred_w = model_w.predict(holdout["X"]).argmax(axis=1)
+        print(accuracy_score(enc_dr.transform(holdout["y"]["dose_rate"].reshape(-1, 1)).toarray().argmax(axis=1), y_pred_dr))
+        print(accuracy_score(enc_w.transform(holdout["y"]["week"].reshape(-1, 1)).toarray().argmax(axis=1), y_pred_w))
+
+        # print(model_dr.score(holdout["X"], enc_dr.transform(holdout["y"]["dose_rate"].reshape(-1, 1)).toarray()))
+        # print(model_w.score(holdout["X"], enc_w.transform(holdout["y"]["week"].reshape(-1, 1)).toarray()))
+        # print(model_dr.score(X,y_dr_one_hot), model_w.score(X,y_w_one_hot))
 
     # Package everything with explicit ordering information
     result = {
@@ -830,8 +880,6 @@ if __name__ == "__main__":
         X_norm = StandardScaler().fit_transform(X) # Normalize
         X = pd.DataFrame(data=X_norm, columns=X.columns)
     X,y_dr, y_w, phenotypes, X_holdout, y_dr_holdout, y_w_holdout, phenotypes_holdout = split_holdout(X,y_dr, y_w, phenotypes)
-    if args.only_landscape:
-        print("Only running causal landscape")
     # Flatten encoded dose-rate labels for downstream use
     y_dr_flat = np.ravel(y_dr)
     y_w_flat = np.ravel(y_w)
@@ -857,13 +905,14 @@ if __name__ == "__main__":
     feature_sets["variance"] = variance_thresholding(X)
 
     # 3) Recursive feature elimination 
+    #TODO this should be done within a 5CV loop 
     if not args.short_version:
         feature_sets["recursive_dose_rate"] = list(
-            recursive_features(X, y_dr_flat, MODELS["svc_linear"])
+            recursive_features(X, y_dr_flat, clone(MODELS["svc_linear"]))
         )
         
         feature_sets["recursive_week"] = list(
-            recursive_features(X, y_w, MODELS["svc_linear"])
+            recursive_features(X, y_w, clone(MODELS["svc_linear"]))
         )
 
     # 4) Causal features for different dose rates
@@ -898,7 +947,7 @@ if __name__ == "__main__":
         feature_sets[f"ai_{name}"] = ai_features(name)
         
     # 7) Sparse features
-    if not args.only_landscape:
+    if not args.short_version:
         feature_sets['elastic_week'] = sparse_features(X, y_w_flat)
         feature_sets['elastic_dose_rate'] = sparse_features(X, y_dr_flat)
     
@@ -907,10 +956,22 @@ if __name__ == "__main__":
         feature_sets["top_genes"] = TOP_GENES
         for top in TOP_PERFORMERS:
             genes_filtered = list(set(feature_sets[top]).intersection(set(X.columns)))
-            feature_sets[f"{top}_recursive_dose_rate"] = recursive_features(X[genes_filtered], y_dr_flat, MODELS['svc_linear'], min_features=10)
-            feature_sets[f"{top}_recursive_week"] = recursive_features(X[genes_filtered], y_w_flat, MODELS['svc_linear'], min_features=10)
+            feature_sets[f"{top}_recursive_dose_rate"] = recursive_features(X[genes_filtered], y_dr_flat, clone(MODELS['svc_linear']), min_features=10)
+            feature_sets[f"{top}_recursive_week"] = recursive_features(X[genes_filtered], y_w_flat, clone(MODELS['svc_linear']), min_features=10)
 
-    if not args.only_landscape:
+    if args.plot_only:
+        # Optionally persist results for later analysis
+        all_scores = None
+        if args.normalize:
+            with open("./features/feature_selection_scores_norm.pkl", "rb") as f:
+                all_scores = pickle.load(f)
+        else:
+            with open("./features/feature_selection_scores.pkl", "rb") as f:
+                all_scores = pickle.load(f)
+
+        # Generate plots for each model
+        plot_scores(all_scores, args.normalize)
+    else:
         #Run each model, each label, on each feature set and store mean/std scores
         all_scores = {}
         for model_name, model in MODELS.items():
@@ -923,7 +984,7 @@ if __name__ == "__main__":
                         genes_filtered = X.columns
                     else:
                         genes_filtered = list(set(genes).intersection(set(X.columns)))
-                    mean, std, score = model_fit(X, y, clone(model), genes=genes,holdout=(X_holdout, labels_holdout[label_name]))
+                    mean, std, score, fitted = model_fit(X, y, clone(model), model_name=model_name, genes=genes,holdout=(X_holdout, labels_holdout[label_name]))
                     all_scores[model_name][label_name][feat_name] = {
                         "mean": float(mean),
                         "std": float(std),
@@ -934,31 +995,58 @@ if __name__ == "__main__":
                         f"{model_name} | {label_name} | {len(genes_filtered)} genes | {feat_name}:  "
                         f"mean={mean:.3f}, std={std:.3f}, score={score:.3f}"
                     )
+                    # Package everything with explicit ordering information
+                    if model_name == "elastic_multitask":
+                        result = {
+                            "features": genes_filtered, 
+                            f"{label_name}": {
+                                "classes": fitted[1].categories_[0].tolist(),
+                                "coef": fitted[0].coef_.tolist(),
+                                "intercept": fitted[0].intercept_.tolist(),
+                                "model":fitted[0]
+                            },
+                        }
+                    else:
+                        result = {
+                            "features": genes_filtered,
+                            f"{label_name}": {
+                                "coef": fitted.coef_.tolist(),
+                                "intercept": fitted.intercept_.tolist(),
+                                "model":fitted
+                            }
+                        }
+                    out_path = f"./features/{model_name}_{label_name}_{feat_name}.pkl"
+                    with open(out_path, "wb") as f:
+                        pickle.dump(result, f)
+                        
+            # Optionally persist results for later analysis
+            if args.normalize:
+                with open("./features/feature_selection_scores_norm.pkl", "wb") as f:
+                    pickle.dump(all_scores, f)
+                with open("./features/feature_norm.pkl", "wb") as f:
+                    pickle.dump(feature_sets, f)
+            else:
+                with open("./features/feature_selection_scores.pkl", "wb") as f:
+                    pickle.dump(all_scores, f)
+                with open("./features/feature.pkl", "wb") as f:
+                    pickle.dump(feature_sets, f)
 
-        # Optionally persist results for later analysis
-        if args.normalize:
-            with open("feature_selection_scores_norm.pkl", "wb") as f:
-                pickle.dump(all_scores, f)
-            with open("feature_norm.pkl", "wb") as f:
-                pickle.dump(feature_sets, f)
-        else:
-            with open("feature_selection_scores.pkl", "wb") as f:
-                pickle.dump(all_scores, f)
-            with open("feature.pkl", "wb") as f:
-                pickle.dump(feature_sets, f)
-
-        # Generate plots for each model
-        plot_scores(all_scores)
+            # Generate plots for each model
+            plot_scores(all_scores, args.normalize)
 
     if args.run_increasing_genes:
         print("Running increasing number of genes...")
         df_rig = run_increasing_num_genes(X,labels,phenotypes, holdout={"X":X_holdout, "y": labels_holdout, "phenotype":phenotypes_holdout})
-        plot_increasing_num_genes(df_rig)
-        
+        if args.normalize:
+            plot_increasing_num_genes(df_rig, out_prefix="increasing_num_genes_norm")
+        else:
+            plot_increasing_num_genes(df_rig)
+
     for top in TOP_PERFORMERS:
         print(top)
         genes_filtered = list(set(feature_sets[top]).intersection(set(X.columns)))
-        multi_task_elastic_net(X[genes_filtered],y_dr,y_w, out_path=f"multi_task_elastic_net_coefs_{top}.pkl", holdout={"X":X_holdout[genes_filtered], "y": labels_holdout})
+        logistic_regression_elastic(X[genes_filtered],y_dr,y_w,  holdout={"X":X_holdout[genes_filtered], "y": labels_holdout})
+        #multi_task_elastic_net(X[genes_filtered],y_dr,y_w, out_path=f"./features/multi_task_elastic_net_coefs_{top}.pkl", holdout={"X":X_holdout[genes_filtered], "y": labels_holdout})
     # Analyze causal graphs
     # for name, file in GRAPHS.items():
     #     print(name)

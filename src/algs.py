@@ -152,7 +152,7 @@ def pc_kci_local_learn(data, seed=None):
 def dag_gnn_local_learn(data, seed):
     d = data.shape[1]
     X = data.values
-    model = DAG_GNN(device_type="gpu", device_ids='1', seed=seed, epochs=50, optimizer='adam')
+    model = DAG_GNN(device_type="gpu", device_ids='1', seed=seed, epochs=300, k_max_iter=50,optimizer='adam')
     model.learn(X)
     return model.causal_matrix
     
