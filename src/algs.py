@@ -218,7 +218,7 @@ def genie3_local_learn(data, celltype, dose, seed=None):
 
 
 def GENELink_local_learn(data, dose, seed=None):
-    path = './data/huvec/GENELink_data_files'
+    path = './data/rpe1_experiment2/GENELink_data_files'
     #exp_file = f"{path}/GeneExpression_key_genes_{dose}.csv"
     tf_file = f"{path}/TF_{dose}.csv"
     target_file = f"{path}/Target_{dose}.csv"

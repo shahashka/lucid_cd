@@ -16,11 +16,14 @@ from src.GENELink.Code.Train_Test_Split import Hard_Negative_Specific_train_test
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 celltype = "rpe1_experiment2" #"huvec" 
 doses = ["F", "G", "H", "I", "J"]#["A", "B", "C", "D", "E"] #
-cd_algs = [("dag_gnn", algs.dag_gnn_local_learn)]#, ("lingam_tetrad", algs.direct_lingam_tetrad_local_learn)]
+cd_algs = [("lingam_tetrad", algs.direct_lingam_tetrad_local_learn)]#,
+        #    ("ges_bic_tetrad", algs.ges_bic_tetrad_local_learn),
+        #    ("pc_fisherz_tetrad", algs.pc_fisherz_tetrad_local_learn) ]
             #("ges_bic_tetrad", algs.ges_bic_tetrad_local_learn) ]
             #("ges_non_param_tetrad", algs.ges_non_param_tetrad_local_learn),
             # ("pc_kci_tetrad", algs.pc_kci_tetrad_local_learn),
             # , ("pc_fisherz_tetrad", algs.pc_fisherz_tetrad_local_learn)
+            #[("dag_gnn", algs.dag_gnn_local_learn)]
               
 
 domain_algs = [("genie3_tf", algs.genie3_local_learn)]#, ("GENELink", algs.GENELink_local_learn)]
@@ -38,7 +41,7 @@ def partition_problem(partition: dict, data: pd.DataFrame):
 
 def run_cd_partition(filter_by_variance = False, bootstrap=False):
     for dose in doses:
-        for cd_name, cd in cd_algs:
+        for cd_name, cd in cd_algs + domain_algs:
             print(f'Running {cd_name} for dose {dose}')
             start = time.time()
             # Load gene epxression 
@@ -71,7 +74,7 @@ def run_cd_partition(filter_by_variance = False, bootstrap=False):
                     threshold=0
                 else:
                     threshold=0.3
-                if bootstrap and (dose=='F' and i <=2):
+                if bootstrap:
                     results.append(bootstrap_cd(i, cd_name, cd, s, dose,threshold=threshold, n_bootstraps=10))
                 # else:
                 #     results.append(bootstrap_cd(i, cd_name, cd, s, dose,threshold=threshold, n_bootstraps=1))
@@ -160,7 +163,7 @@ def run_GENELink(bootstrap=False, with_radiation=False):
     n_bootstrap = 10
     for dose in doses:
         start = time.time()
-        exp_file = f"{path}/GeneExpression_key_genes_{dose}.csv"            
+        exp_file = f"{path}/GeneExpression_{dose}_key_genes.csv"            
         data = pd.read_csv(exp_file,index_col=0)
         if with_radiation:
             rad_column = pd.read_csv(f"{path}/GeneExpression_d{dose}.csv",index_col=0)['radiation']
@@ -239,8 +242,8 @@ def train_test_split_genelink():
                                                                 p_val=0.5)
 if __name__ == "__main__":
     #run_BEELINE()
-    #run_cd_partition(filter_by_variance=False, bootstrap=True)
+    run_GENELink(bootstrap=True, with_radiation=False)
+    run_cd_partition(filter_by_variance=False, bootstrap=True)
     # run_cd_no_partition()
-    #run_GENELink(bootstrap=False, with_radiation=False)
-    run_combined_cd()
+    #run_combined_cd()
     #train_test_split_genelink()
