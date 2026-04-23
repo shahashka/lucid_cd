@@ -185,16 +185,17 @@ def pathway_enrichment(genes,background_genes, pathways) -> pd.DataFrame:
     Returns:
         (List[Any]): Return a list of named pathways and scores for each 
     """
-    gp = GProfiler(return_dataframe=True)
-
+    print('call gprofiler')
+    gp = GProfiler(return_dataframe=True, base_url="https://biit.cs.ut.ee/gprofiler_archive3/e113_eg59_p19/")
     results = gp.profile(
         organism="hsapiens",
         query=list(set(genes)),
-        sources=["GO:BP", "GO:MF", "GO_:CC", "KEGG", "REAC", "WP"],
+        sources=["GO:BP", "GO:MF", "GO:CC", "KEGG", "REAC", "WP"],
         user_threshold=0.05,
         background=background_genes, 
         significance_threshold_method="fdr"
     )
+    print('done call ')
 
     # Sort by adjusted p-value
     results = results.sort_values("p_value")
@@ -1391,6 +1392,9 @@ def main():
     #                          n_random=5, output_dir=out_dir)
     de_gene_intersection = set.intersection(*[set(genes) for genes in genes_by_dose.values()])
     causal_gene_intersection = set.intersection(*[set(genes) for genes in graphs_genes_by_dose.values()])
+    # causal_gene_intersection = set.intersection(*[set(graphs_genes_by_dose[d]) for d in DOSE_RATE_LABELS])
+
+    print(len(set(causal_gene_intersection)))
     invariant_plots(out_dir, causal_gene_intersection, de_gene_intersection,
                              background_genes)
     housekeeping_parent_enrichment(output_dir=out_dir)
