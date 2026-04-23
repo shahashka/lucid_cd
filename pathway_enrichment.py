@@ -4,39 +4,26 @@ import pandas as pd
 import numpy as np
 import pickle
 import networkx as nx
-import seaborn as sns
 import matplotlib.pyplot as plt
 from itertools import chain, combinations, product
-from Bio import Entrez
 from matplotlib_venn import venn2, venn3
 from upsetplot import from_memberships, UpSet
 from gprofiler import GProfiler
 import matplotlib.cm as cm
 from matplotlib.lines import Line2D
-from matplotlib.patches import Patch
 from matplotlib.legend_handler import HandlerTuple
 from matplotlib.colors import to_hex
 import json
-from sklearn.linear_model import LinearRegression
-from plot_settings import _fs_axis, _fs_leg, _fs_leg_title, _fs_tick, _fs_title, _DEFAULT_CMAPS
-GRAPHS = {"invariant": "/homes/shahashka/lucid_cd/data/rpe1_experiment2/bootstrap_graphs3/dag_gnn_combined.gexf",
-          "F":"/homes/shahashka/lucid_cd/data/rpe1_experiment2/bootstrap_graphs2/dag_gnn_full_doseF.gexf",
-          "G":"/homes/shahashka/lucid_cd/data/rpe1_experiment2/bootstrap_graphs2/dag_gnn_full_doseG.gexf",
-          "H":"/homes/shahashka/lucid_cd/data/rpe1_experiment2/bootstrap_graphs2/dag_gnn_full_doseH.gexf",
-          "I":"/homes/shahashka/lucid_cd/data/rpe1_experiment2/bootstrap_graphs2/dag_gnn_full_doseI.gexf",
-          "J":"/homes/shahashka/lucid_cd/data/rpe1_experiment2/bootstrap_graphs2/dag_gnn_full_doseJ.gexf" 
-          }
+from scipy.stats import fisher_exact
+
+from global_variables import _fs_axis, _fs_leg, _fs_leg_title, _fs_tick, _fs_title, _DEFAULT_CMAPS, GRAPHS, DOSE_RATE_LABELS, DOSE_RATES_REGRESSION, DOSE_RATES_SORTED, HK_PATH
+
 with open("/homes/shahashka/lucid_cd/data/gene_groups.pkl", "rb") as f:
     CAUSAL_TFS, CAUSAL_NEIGHBORHOODS, KOSMOS, CHATGPT, BNL = pickle.load(f)
-EXPERIMENT = "./data/rpe1_experiment2"
+EXPERIMENT = "/homes/shahashka/lucid_cd/data/rpe1_experiment2"
 CONTEXT_SPECIFIC_GRAPHS = f"{EXPERIMENT}/bootstrap_graphs2"
 INVARIANT_GRAPHS = f"{EXPERIMENT}/bootstrap_graphs3"
-CAUSAL_DOSE_RATES = ["dF", "dG", "dH", "dI", "dJ"]
-DOSE_RATES = ["F", "G", "H", "I", "J"]
-DOSE_RATES_ACTUAL = {"F": 0.38, "G": 0.28, "H": 0.55, "I": 6.66, "J": 12.11, "shared":0}
-DOSE_RATES_SORTED = ["G", "F", "H", "I", "J"]
 
-WEEKS = np.arange(10)
 GOBP_PATHWAYS = [("GO:0010212",	"response to ionizing radiation"),
                  ("GO:0006974", "DNA damage response"),
                  ("GO:0007050","cell cycle arrest"),
@@ -68,7 +55,6 @@ WP_PATHWAYS = [("WP:WP45","G1 to S cell cycle control"),
 ALL_PATHWAY_ENTRIES = GOBP_PATHWAYS + KEGG_PATHWAYS + WP_PATHWAYS
 PATHWAY_DESCRIPTIONS = {pid.strip(): desc.strip() for pid, desc in ALL_PATHWAY_ENTRIES}
 ALL_RADIATION_PATHWAY_IDS = [pid.strip() for pid, _ in ALL_PATHWAY_ENTRIES]
-
 PATHWAY_CATEGORIES = {
 
     "DNA_damage_sensing_response": [
@@ -138,38 +124,11 @@ _CATEGORY_DISPLAY_NAMES = {
     "uncategorized":                      "Uncategorized",
 }
 
-def _format_category_legend_name(cat_key):
-    return _CATEGORY_DISPLAY_NAMES.get(cat_key, cat_key.replace("_", " "))
+CORR_GENES_PATH = "/homes/shahashka/lucid_cd/nested_cv_results_phenotype_w_apoptosis/stable_features_multiple_correlation_joint.csv"
+RF_GENES_PATH = "/homes/shahashka/lucid_cd/nested_cv_results_phenotype_w_apoptosis/stable_features_rf.csv"
 
-
-def _ordered_pathways_with_category_labels(pathway_ids, descriptions=None):
-    """Order pathways by PATHWAY_CATEGORIES; labels are id + description (no category suffix)."""
-    if descriptions is None:
-        descriptions = PATHWAY_DESCRIPTIONS
-    category_order = list(PATHWAY_CATEGORIES.keys())
-
-    def sort_key(p):
-        cat = PATHWAY_TO_CATEGORY.get(p)
-        if cat is None:
-            return (len(category_order), 999, p)
-        ci = category_order.index(cat)
-        idx_in_cat = PATHWAY_CATEGORIES[cat].index(p)
-        return (ci, idx_in_cat, p)
-
-    ordered = sorted(pathway_ids, key=sort_key)
-    labels = []
-    categories = []
-    for p in ordered:
-        cat = PATHWAY_TO_CATEGORY.get(p, "uncategorized")
-        categories.append(cat)
-        desc = descriptions.get(p, "").strip()
-        if desc:
-            labels.append(f"{desc} \n {p}")
-        else:
-            labels.append(p)
-    return ordered, labels, categories
 def load_data():
-    log2fold_df = pd.read_csv(f"/homes/shahashka/lucid_cd/data/rpe1_experiment2/rpe1_9week_study_experiment2_diffexp_deseq_vs_control_all_dG_W2_adjust.txt", sep="\t")
+    log2fold_df = pd.read_csv(f"{EXPERIMENT}/rpe1_9week_study_experiment2_diffexp_deseq_vs_control_all_dG_W2_adjust.txt", sep="\t")
     log2fold_df = log2fold_df.loc[log2fold_df['padj'] < 0.05] # This is new, I think I should filter by p value. However this means there are no genes that DE across all dose rates
     log2fold_df = log2fold_df.loc[abs(log2fold_df['log2FoldChange']) > 1]
 
@@ -178,7 +137,7 @@ def load_data():
     genes_by_dose = {} 
     
     # LOAD DIFFERENTIAL EXPRESSION DATA (temporal)
-    for i in WEEKS:
+    for i in np.arange(10):
         week_i = log2fold_df.loc[log2fold_df["Week"] == i]
         genes_week_i = set(week_i["Gene"])
         for g in genes_week_i:
@@ -188,13 +147,14 @@ def load_data():
                 genes_by_week[g] = set([i])
                 
     # LOAD DIFFERENTIAL EXPRESSION DATA (dose rate)       
-    for d in CAUSAL_DOSE_RATES:
-        dose_i = log2fold_df.loc[log2fold_df["Dose"] == d]
+    for d in DOSE_RATE_LABELS:
+        dose_i = log2fold_df.loc[log2fold_df["Dose"] == f"d{d}"]
         genes_dose_i = dose_i["Gene"]
-        genes_by_dose[d[1]] = list(set(genes_dose_i))
+        genes_by_dose[d] = list(set(genes_dose_i))
         
     # LOAD TPM DATA
     tpm_df = pd.read_csv(f"{EXPERIMENT}/rpe1_9week_study_experiment2_all_tpm.tsv", header=0, sep='\t')
+    
     # LOAD CAUSAL DATA
     graphs = []
     graphs_genes_by_dose = {}
@@ -206,7 +166,7 @@ def load_data():
     # LOAD CAUSAL NEIGHBORHOOD/TF DATA
     genes_100_tfs = {}
     genes_neighborhoods = {}
-    for d in DOSE_RATES:
+    for d in DOSE_RATE_LABELS:
         genes_100_tfs[d] = pd.read_csv(f"{CONTEXT_SPECIFIC_GRAPHS}/top_100_dag_gnn_{d}.csv", header=None).iloc[:,0].to_list()
         genes_neighborhoods[d] = pd.read_csv(f"{CONTEXT_SPECIFIC_GRAPHS}/rad_sub_dag_gnn_{d}_ranked.csv", header=0).iloc[:,0].to_list()
 
@@ -215,55 +175,6 @@ def load_data():
     genes_neighborhoods['all_doses_week'] = pd.read_csv(f"{INVARIANT_GRAPHS}/week_sub_dag_gnn_combined_ranked.csv", header=0).iloc[:,0].to_list()
     
     return tpm_df, log2fold_df, graphs_genes_by_dose, genes_by_dose, genes_neighborhoods, genes_100_tfs
-def load_ml_data():
-    log2fold_df = pd.read_csv(f"/homes/shahashka/lucid_cd/data/rpe1_experiment2/rpe1_9week_study_experiment2_diffexp_deseq_vs_control_all_dG_W2_adjust.txt", sep="\t")
-
-    log2fold_df = log2fold_df.groupby(["Dose", "Week", "Gene"]).mean(numeric_only=True)
-    log2fold_df = log2fold_df["log2FoldChange"].unstack(level='Gene')
-    log2fold_df = log2fold_df.reset_index()
-    log2fold_df = log2fold_df.rename(columns={"Dose":"dose_rate", "Week": "week"})
-    
-    log2fold_df['dose_rate'] = [DOSE_RATES_ACTUAL[d[1]] for d in log2fold_df['dose_rate']]
-    log2fold_df['week'] = [float(w[1]) for w in log2fold_df['week']]
-    log2fold_df_na = log2fold_df.dropna(axis=1) # identify genes that are differenitlaly expressed across dose rates while ignoring significance
-    
-    labels_w = log2fold_df_na['week']
-    labels_dr_regression = log2fold_df_na['dose_rate']
-    X = log2fold_df_na.drop(columns=["dose_rate", "week"])
-    
-    return X,labels_dr_regression, labels_w
-
-def _remove_labels(X):
-    if "radiation" in X.columns:
-        X = X.drop(columns=["radiation"])
-    if "dose_rate" in X.columns:
-        X = X.drop(columns=["dose_rate"])
-    if "week" in X.columns:
-        X = X.drop(columns=["week"])
-    return X
-
-def bootstrap_enrichment_CI(genes, background_genes, n_boot, pathways) ->  pd.DataFrame:
-    stats = {}
-    for p in pathways:
-        stats[p] = []
-    
-    for _ in range(n_boot):
-        boot_genes = np.random.choice(genes, size=len(genes), replace=True)
-        df = pathway_enrichment(boot_genes, background_genes, pathways)
-        for _, row in df.iterrows():
-                stats[row["native"]].append(-np.log10(row["p_value"]))
-
-    ci = {}
-    for pathway, values in stats.items():
-        if len(values) > 10:
-            ci[pathway] = {
-                "mean": np.mean(values),
-                "ci_low": np.percentile(values, 2.5),
-                "ci_high": np.percentile(values, 97.5)
-            }
-        
-
-    return ci
 
 def pathway_enrichment(genes,background_genes, pathways) -> pd.DataFrame:
     """Given a list of genes, perform pathway enrichment using knowledge databases
@@ -292,10 +203,6 @@ def pathway_enrichment(genes,background_genes, pathways) -> pd.DataFrame:
     else:
         return results
 
-
-CORR_GENES_PATH = "/homes/shahashka/lucid_cd/nested_cv_results_phenotype_refactored2/stable_features_multiple_correlation_joint.csv"
-
-
 def random_gene_sanity_check(background_genes, graphs_genes_by_dose,
                              n_random=5, output_dir="."):
     """Sanity check: pathway enrichment on random gene sets of the same size as causal sets.
@@ -306,7 +213,7 @@ def random_gene_sanity_check(background_genes, graphs_genes_by_dose,
     the top correlative genes (same size) from the joint-ranked correlation list.
     """
     import seaborn as sns
-    from plot_settings import _fs_axis, _fs_tick, _fs_title, _fs_leg
+    from global_variables import _fs_axis, _fs_tick, _fs_title, _fs_leg
 
     print("\n=== Random Gene Sanity Check ===\n")
     np.random.seed(42)
@@ -357,16 +264,16 @@ def random_gene_sanity_check(background_genes, graphs_genes_by_dose,
     # Plot: boxplots of top-10 -log10(p) distributions per dose
     source_order = ["Causal", "Corr.", "Random"]
     palette = {"Causal": "orange", "Corr.": "steelblue", "Random": "lightgray"}
-    fig, axes = plt.subplots(1, len(DOSE_RATES), figsize=(4 * len(DOSE_RATES), 5),
+    fig, axes = plt.subplots(1, len(DOSE_RATE_LABELS), figsize=(4 * len(DOSE_RATE_LABELS), 5),
                              sharey=True)
     for ax, d in zip(axes, DOSE_RATES_SORTED):
         sub = df[df["dose"] == d]
         sns.boxplot(data=sub, x="source", y="neg_log10_p", ax=ax,
                     hue="source", hue_order=source_order, palette=palette,
                     order=source_order, legend=False)
-        ax.set_title(f"{DOSE_RATES_ACTUAL[d]} mGy/hr", fontsize=_fs_axis)
+        ax.set_title(f"{DOSE_RATES_REGRESSION[d]} mGy/hr", fontsize=_fs_axis)
         ax.set_xlabel("", fontsize=_fs_axis)
-        ax.set_ylabel("$-\\log_{10}(p)$" if d == DOSE_RATES[0] else "", fontsize=_fs_axis)
+        ax.set_ylabel("$-\\log_{10}(p)$" if d == DOSE_RATE_LABELS[0] else "", fontsize=_fs_axis)
         ax.tick_params(labelsize=_fs_tick)
 
     fig.suptitle("Top 10 Pathways (term size < 300): Causal vs Correlative vs Random",
@@ -423,6 +330,37 @@ def generate_plots(datasets, cmap_names=None, pathway_descriptions=None,
         raise TypeError("datasets must be a non-empty dict mapping name -> data dict")
     if agnostic_datasets is None:
         agnostic_datasets = {}
+
+    def _format_category_legend_name(cat_key):
+        return _CATEGORY_DISPLAY_NAMES.get(cat_key, cat_key.replace("_", " "))
+
+
+    def _ordered_pathways_with_category_labels(pathway_ids, descriptions=None):
+        """Order pathways by PATHWAY_CATEGORIES; labels are id + description (no category suffix)."""
+        if descriptions is None:
+            descriptions = PATHWAY_DESCRIPTIONS
+        category_order = list(PATHWAY_CATEGORIES.keys())
+
+        def sort_key(p):
+            cat = PATHWAY_TO_CATEGORY.get(p)
+            if cat is None:
+                return (len(category_order), 999, p)
+            ci = category_order.index(cat)
+            idx_in_cat = PATHWAY_CATEGORIES[cat].index(p)
+            return (ci, idx_in_cat, p)
+
+        ordered = sorted(pathway_ids, key=sort_key)
+        labels = []
+        categories = []
+        for p in ordered:
+            cat = PATHWAY_TO_CATEGORY.get(p, "uncategorized")
+            categories.append(cat)
+            desc = descriptions.get(p, "").strip()
+            if desc:
+                labels.append(f"{desc} \n {p}")
+            else:
+                labels.append(p)
+        return ordered, labels, categories
 
     names = list(datasets.keys())
     n_ds = len(names)
@@ -606,63 +544,6 @@ def generate_plots(datasets, cmap_names=None, pathway_descriptions=None,
     plt.savefig(f"{output_dir}/{filename}.png", format="png", dpi=300, **_save_kw)
     plt.savefig(f"{output_dir}/{filename}.svg", format="svg", dpi=300, **_save_kw)
 
-# def generate_sanity_check_plots(radiation_data, top_enriched_data, filename_prefix="sanity_check", output_dir="."):
-#     """Bar plots for sanity check results (not dose-rate dependent).
-
-#     Parameters
-#     ----------
-#     radiation_data : dict
-#         Keys: ``pathways`` (list of native IDs), ``logp_values`` (list of floats).
-#     top_enriched_data : dict
-#         Keys: ``pathways``, ``names``, ``sources``, ``neg_log10_p`` (arrays).
-#     filename_prefix : str
-#         Base filename prefix for saved figures.
-#     """
-#     _save_kw = dict(bbox_inches="tight", pad_inches=0.2)
-#     _fs_axis = 14
-#     _fs_tick = 11
-#     _fs_title = 15
-
-#     # --- Plot 1: Radiation pathways ---
-#     pw_ids = radiation_data["pathways"]
-#     values = radiation_data["logp_values"]
-#     labels = [PATHWAY_DESCRIPTIONS.get(p, p) for p in pw_ids]
-
-#     fig, ax = plt.subplots(figsize=(12, max(6, 0.4 * len(pw_ids))))
-#     y_pos = np.arange(len(pw_ids))
-#     colors = ["tab:blue" if v > -np.log10(0.05) else "lightgray" for v in values]
-#     ax.barh(y_pos, values, color=colors, edgecolor="white", linewidth=0.4)
-#     ax.set_yticks(y_pos)
-#     ax.set_yticklabels(labels, fontsize=_fs_tick)
-#     ax.set_xlabel(r"$-\log_{10}(p)$", fontsize=_fs_axis)
-#     ax.set_title("Sanity Check: Radiation Pathways", fontsize=_fs_title, fontweight="bold")
-#     ax.axvline(-np.log10(0.05), linestyle="--", color="red", alpha=0.5, label="p = 0.05")
-#     ax.legend(fontsize=_fs_tick)
-#     ax.invert_yaxis()
-#     plt.tight_layout()
-#     # plt.savefig(f"{output_dir}/{filename_prefix}_radiation_pathways.pdf", format="pdf", **_save_kw)
-#     plt.savefig(f"{output_dir}/{filename_prefix}_radiation_pathways.png", format="png", dpi=300, **_save_kw)
-#     plt.close()
-
-#     # --- Plot 2: Top enriched pathways ---
-#     top_labels = [f"{n} ({s})" for n, s in zip(top_enriched_data["names"], top_enriched_data["sources"])]
-#     top_values = top_enriched_data["neg_log10_p"]
-
-#     fig, ax = plt.subplots(figsize=(12, max(6, 0.4 * len(top_labels))))
-#     y_pos = np.arange(len(top_labels))
-#     ax.barh(y_pos, top_values, color="tab:green", edgecolor="white", linewidth=0.4)
-#     ax.set_yticks(y_pos)
-#     ax.set_yticklabels(top_labels, fontsize=_fs_tick)
-#     ax.set_xlabel(r"$-\log_{10}(p)$", fontsize=_fs_axis)
-#     ax.set_title("Sanity Check: Top Enriched Pathways", fontsize=_fs_title, fontweight="bold")
-#     ax.axvline(-np.log10(0.05), linestyle="--", color="red", alpha=0.5, label="p = 0.05")
-#     ax.legend(fontsize=_fs_tick)
-#     ax.invert_yaxis()
-#     plt.tight_layout()
-#     # plt.savefig(f"{output_dir}/{filename_prefix}_top_enriched.pdf", format="pdf", **_save_kw)
-#     plt.savefig(f"{output_dir}/{filename_prefix}_top_enriched.png", format="png", dpi=300, **_save_kw)
-#     plt.close()
-
 
 def generate_top_plots(datasets, cmap_names=None, filename="top10_pathway_enrichment",
                        agnostic_datasets=None, output_dir="."):
@@ -704,7 +585,7 @@ def generate_top_plots(datasets, cmap_names=None, filename="top10_pathway_enrich
     panels = [(name, datasets[name], cmaps[k]) for k, name in enumerate(names)]
 
     first_data = next(iter(datasets.values()))
-    dose_keys = sorted(first_data.keys(), key=lambda d: DOSE_RATES_ACTUAL.get(d, 0))
+    dose_keys = sorted(first_data.keys(), key=lambda d: DOSE_RATES_REGRESSION.get(d, 0))
     print(dose_keys)
     n_dose = len(dose_keys)
 
@@ -813,7 +694,7 @@ def generate_top_plots(datasets, cmap_names=None, filename="top10_pathway_enrich
             dose_handles.append(
                 Line2D([0], [0], color=cmap_obj(t), lw=8, solid_capstyle="butt")
             )
-            dose_labels.append(f"{panel_names[k]}: {_format_dose_label(DOSE_RATES_ACTUAL[d])} mGy/hr")
+            dose_labels.append(f"{panel_names[k]}: {_format_dose_label(DOSE_RATES_REGRESSION[d])} mGy/hr")
 
     ncol_leg = min(n_dose, 5)
     # fig.legend(
@@ -881,12 +762,11 @@ def venn_diagrams(graphs_genes_by_dose, genes_by_dose, rf_genes=None, corr_genes
         DE gene sets keyed by dose rate letter.
     """
     _save_kw = dict(bbox_inches="tight", pad_inches=0.2)
-    dose_keys = sorted(DOSE_RATES, key=lambda d: DOSE_RATES_ACTUAL.get(d, 0))
-
-    pairs = list(combinations(dose_keys, 2))  # 10 pairs
+    
+    pairs = list(combinations(DOSE_RATES_SORTED, 2))  # 10 pairs
 
     def _dose_label(d):
-        return f"{DOSE_RATES_ACTUAL[d]} mGy/hr"
+        return f"{DOSE_RATES_REGRESSION[d]} mGy/hr"
 
     # --- Figure 1 & 2: pairwise across dose rates for each method ---
     _venn_color_causal = to_hex(cm.get_cmap("OrangesDark")(0.5))
@@ -928,7 +808,7 @@ def venn_diagrams(graphs_genes_by_dose, genes_by_dose, rf_genes=None, corr_genes
 
     # --- Figure 3: Causal vs DE at each dose rate ---
     fig, axes = plt.subplots(1, 5, figsize=(25, 5))
-    for idx, d in enumerate(dose_keys):
+    for idx, d in enumerate(DOSE_RATES_SORTED):
         ax = axes[idx]
         set_causal = set(graphs_genes_by_dose[d])
         set_de = set(genes_by_dose[d])
@@ -956,7 +836,7 @@ def venn_diagrams(graphs_genes_by_dose, genes_by_dose, rf_genes=None, corr_genes
         _venn_color_rf = to_hex(cm.get_cmap("Greens")(0.5))
         set_rf = set(rf_genes)
         fig, axes = plt.subplots(1, 5, figsize=(25, 5))
-        for idx, d in enumerate(dose_keys):
+        for idx, d in enumerate(DOSE_RATES_SORTED):
             ax = axes[idx]
             set_causal = set(graphs_genes_by_dose[d])
             set_de = set(genes_by_dose[d])
@@ -983,7 +863,7 @@ def venn_diagrams(graphs_genes_by_dose, genes_by_dose, rf_genes=None, corr_genes
         _venn_color_corr = to_hex(cm.get_cmap("Purples")(0.5))
         set_corr = set(corr_genes)
         fig, axes = plt.subplots(1, 5, figsize=(25, 5))
-        for idx, d in enumerate(dose_keys):
+        for idx, d in enumerate(DOSE_RATES_SORTED):
             ax = axes[idx]
             set_causal = set(graphs_genes_by_dose[d])
             set_de = set(genes_by_dose[d])
@@ -1006,12 +886,12 @@ def venn_diagrams(graphs_genes_by_dose, genes_by_dose, rf_genes=None, corr_genes
         plt.savefig(f"{output_dir}/venn_causal_vs_de_vs_corr.svg", format="svg", dpi=300, **_save_kw)
 
     # --- UpSet plots: all dose rates at once ---
-    _label_to_dose_val = {_dose_label(d): DOSE_RATES_ACTUAL[d] for d in dose_keys}
+    _label_to_dose_val = {_dose_label(d): DOSE_RATES_REGRESSION[d] for d in DOSE_RATES_SORTED}
 
     def _build_memberships(gene_dict):
         """Return a list of (membership_tuple, gene) pairs for upsetplot."""
         gene_to_sets = {}
-        for d in dose_keys:
+        for d in DOSE_RATES_SORTED:
             for g in gene_dict[d]:
                 gene_to_sets.setdefault(g, set()).add(_dose_label(d))
         memberships = []
@@ -1216,14 +1096,13 @@ def invariant_plots(outdir, causal_invariant_genes, de_invariant_genes,
     plt.close()
 
     # --- Housekeeping gene overlap ---
-    hk_path = "/homes/shahashka/lucid_cd/data/prior_knowledge/HSIAO_HOUSEKEEPING_GENES.v2026.1.Hs.json"
-    with open(hk_path, "r") as f:
+    with open(HK_PATH, "r") as f:
         hk_data = json.load(f)
     hk_genes = set(hk_data["HSIAO_HOUSEKEEPING_GENES"]["geneSymbols"])
 
     # Load perfect genes per dose rate
     perfect_genes_by_dose = {}
-    for d in DOSE_RATES:
+    for d in DOSE_RATE_LABELS:
         path = os.path.join("structure_analysis", f"perfect_genes_{d}.pkl")
         if os.path.exists(path):
             with open(path, "rb") as fh:
@@ -1239,11 +1118,11 @@ def invariant_plots(outdir, causal_invariant_genes, de_invariant_genes,
     print(f"DE invariant ∩ housekeeping: {len(de_hk)}/{len(de_set)} "
           f"({100*len(de_hk)/len(de_set):.1f}%)")
 
-    for d in DOSE_RATES:
+    for d in DOSE_RATE_LABELS:
         if d in perfect_genes_by_dose:
             perf = perfect_genes_by_dose[d]
             perf_hk = perf & hk_genes
-            print(f"Perfect {d} ({DOSE_RATES_ACTUAL[d]} mGy/hr) ∩ housekeeping: "
+            print(f"Perfect {d} ({DOSE_RATES_REGRESSION[d]} mGy/hr) ∩ housekeeping: "
                   f"{len(perf_hk)}/{len(perf)} ({100*len(perf_hk)/len(perf):.1f}%)")
 
     # Fisher's exact test: enrichment/depletion of housekeeping genes
@@ -1268,57 +1147,9 @@ def invariant_plots(outdir, causal_invariant_genes, de_invariant_genes,
                       "p (enriched)": f"{p_enrich:.2e}",
                       "p (depleted)": f"{p_deplete:.2e}"})
 
-    # for d in DOSE_RATES:
-    #     if d in perfect_genes_by_dose:
-    #         gene_set = perfect_genes_by_dose[d]
-    #         overlap = len(gene_set & hk_genes)
-    #         n_set = len(gene_set)
-    #         table = [[overlap, n_set - overlap],
-    #                  [n_hk_in_bg - overlap, n_bg - n_set - n_hk_in_bg + overlap]]
-    #         odds, p_enrich = fisher_exact(table, alternative="greater")
-    #         _, p_deplete = fisher_exact(table, alternative="less")
-    #         rows.append({"Gene Set": f"Perfect {d} ({DOSE_RATES_ACTUAL[d]} mGy/hr)",
-    #                       "Size": n_set,
-    #                       "HK Overlap": overlap,
-    #                       "HK Fraction": f"{100*overlap/n_set:.1f}%",
-    #                       "Odds Ratio": f"{odds:.2f}",
-    #                       "p (enriched)": f"{p_enrich:.2e}",
-    #                       "p (depleted)": f"{p_deplete:.2e}"})
-
     hk_df = pd.DataFrame(rows)
     print("\n" + hk_df.to_string(index=False))
     hk_df.to_csv(f"{outdir}/housekeeping_overlap.csv", index=False)
-
-    # # Venn: causal invariant vs housekeeping
-    # _venn_color_hk = to_hex(cm.get_cmap("Greens")(0.5))
-
-    # fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-    # v1 = venn2([causal_set, hk_genes], set_labels=("Causal Invariant", "Housekeeping"))
-    #         #    set_colors=(_venn_color_causal, _venn_color_hk), ax=axes[0])
-    # for text in (v1.set_labels or []):
-    #     if text:
-    #         text.set_fontsize(16)
-    # for text in (v1.subset_labels or []):
-    #     if text:
-    #         text.set_fontsize(16)
-    # axes[0].set_title("Causal Invariant vs Housekeeping", fontsize=_fs_leg_title, fontweight="bold")
-
-    # v2 = venn2([de_set, hk_genes], set_labels=("DE Invariant", "Housekeeping")),
-    #         #    set_colors=(_venn_color_de, _venn_color_hk), ax=axes[1])
-    # for text in (v2.set_labels or []):
-    #     if text:
-    #         text.set_fontsize(16)
-    # for text in (v2.subset_labels or []):
-    #     if text:
-    #         text.set_fontsize(16)
-    # axes[1].set_title("DE Invariant vs Housekeeping", fontsize=_fs_leg_title, fontweight="bold")
-
-    # fig.suptitle("Invariant Genes vs Housekeeping Genes",
-    #              fontsize=_fs_title, fontweight="bold")
-    # fig.tight_layout(rect=[0, 0, 1, 0.93])
-    # plt.savefig(f"{outdir}/venn_invariant_vs_housekeeping.png", format="png", dpi=300, **_save_kw)
-    # plt.savefig(f"{outdir}/venn_invariant_vs_housekeeping.svg", format="svg", dpi=300, **_save_kw)
-    # plt.close()
 
     # Bar chart: housekeeping fraction per gene set
     bar_names = [r["Gene Set"] for r in rows]
@@ -1356,19 +1187,17 @@ def housekeeping_parent_enrichment(output_dir=".", graph_pattern="invariant_subg
     Differential enrichment then identifies pathways over-represented
     in HK-specific ancestors relative to non-ancestors.
     """
-    from scipy.stats import fisher_exact
 
     subgraph_dir = os.path.join(output_dir, "..", "structure_analysis")
 
     # Load housekeeping genes
-    hk_path = "/homes/shahashka/lucid_cd/data/prior_knowledge/HSIAO_HOUSEKEEPING_GENES.v2026.1.Hs.json"
-    with open(hk_path, "r") as f:
+    with open(HK_PATH, "r") as f:
         hk_data = json.load(f)
     hk_genes = set(hk_data["HSIAO_HOUSEKEEPING_GENES"]["geneSymbols"])
 
     # Background: all genes in the TPM expression matrix
     tpm_df = pd.read_csv(
-        "/homes/shahashka/lucid_cd/data/rpe1_experiment2/cd_tpm_matrix_combined_dose_rate.csv",
+        f"{EXPERIMENT}/cd_tpm_matrix_combined_dose_rate.csv",
         header=0, nrows=0,
     )
     background_genes = [c for c in tpm_df.columns if c not in ("dose_rate", "week")]
@@ -1378,7 +1207,7 @@ def housekeeping_parent_enrichment(output_dir=".", graph_pattern="invariant_subg
     top_data_diff = {}
     _save_kw = dict(bbox_inches="tight", pad_inches=0.2)
 
-    for d in DOSE_RATES:
+    for d in DOSE_RATE_LABELS:
         sub_path = os.path.join(subgraph_dir, graph_pattern.format(d=d))
         if not os.path.exists(sub_path):
             print(f"  Dose {d}: annotated subgraph not found, skipping")
@@ -1546,569 +1375,6 @@ def housekeeping_parent_enrichment(output_dir=".", graph_pattern="invariant_subg
             filename=filename + "_differential",
             output_dir=output_dir, cmap_names=["OrangesDark"]
         )
-        
-def housekeeping_structural_scatter(output_dir=".",
-                                    graph_pattern="invariant_subgraph_{d}_annotated.gexf"):
-    """Scatter in-degree vs out-degree split into separate subplots per category × dose.
-
-    Layout: rows = categories, columns = dose rates (shared axes across all panels).
-    Categories:
-      Non-ancestor  — no directed path to any HK gene, not HK itself
-      HK ancestor   — has directed path to ≥1 HK gene, not HK itself
-      HK gene       — node is a housekeeping gene
-    """
-    subgraph_dir = os.path.join(output_dir, "..", "structure_analysis")
-
-    hk_path = "/homes/shahashka/lucid_cd/data/prior_knowledge/HSIAO_HOUSEKEEPING_GENES.v2026.1.Hs.json"
-    with open(hk_path, "r") as f:
-        hk_data = json.load(f)
-    hk_genes = set(hk_data["HSIAO_HOUSEKEEPING_GENES"]["geneSymbols"])
-
-    EXCLUDE = {"radiation", "dose_rate", "week"}
-    category_colors = {
-        "HK gene":      "#E15759",
-        "HK ancestor":  "#4E79A7",
-        "Non-ancestor": "#BAB0AC",
-    }
-    category_props = {
-        "Non-ancestor": dict(alpha=0.90, s=25, marker="o"),
-        "HK ancestor":  dict(alpha=0.90, s=35, marker="o"),
-        "HK gene":      dict(alpha=0.90, s=50, marker="o"),
-    }
-    category_order = ["Non-ancestor", "HK ancestor", "HK gene"]
-    n_cats = len(category_order)
-    n_doses = len(DOSE_RATES_SORTED)
-
-    # First pass: build per-dose DataFrames and compute global axis limits
-    dose_dfs = {}
-    dose_graphs = {}
-    dose_gene_nodes = {}
-    for d in DOSE_RATES_SORTED:
-        sub_path = os.path.join(subgraph_dir, graph_pattern.format(d=d))
-        if not os.path.exists(sub_path):
-            continue
-        G = nx.read_gexf(sub_path)
-        gene_nodes = [n for n in G.nodes() if n not in EXCLUDE]
-        hk_in_graph = set(n for n in gene_nodes if n in hk_genes)
-
-        hk_ancestors = set()
-        for hk_node in hk_in_graph:
-            hk_ancestors.update(nx.ancestors(G, hk_node))
-        hk_ancestors -= hk_in_graph
-
-        records = []
-        for n in gene_nodes:
-            if n in hk_in_graph:
-                cat = "HK gene"
-            elif n in hk_ancestors:
-                cat = "HK ancestor"
-            else:
-                cat = "Non-ancestor"
-            records.append({
-                "in_degree":  G.in_degree(n),
-                "out_degree": G.out_degree(n),
-                "category":   cat,
-            })
-        dose_dfs[d] = pd.DataFrame(records)
-        dose_graphs[d] = G
-        dose_gene_nodes[d] = gene_nodes
-        counts = dose_dfs[d]["category"].value_counts()
-        print(f"Dose {d}: " + ", ".join(f"{cat}={counts.get(cat,0)}" for cat in category_order))
-
-    all_in  = pd.concat(dose_dfs.values())["in_degree"]
-    all_out = pd.concat(dose_dfs.values())["out_degree"]
-    x_max = all_in.max() + 1
-    y_max = all_out.max() + 1
-
-    # Mann-Whitney U tests: all pairwise comparisons per dose rate
-    from scipy.stats import mannwhitneyu
-    from itertools import combinations as _combinations
-
-    stat_rows = []
-    pairs = list(_combinations(category_order, 2))
-    print("\n=== Mann-Whitney U: in-degree and out-degree by category ===")
-    for d, df in dose_dfs.items():
-        print(f"\nDose {d} ({DOSE_RATES_ACTUAL[d]} mGy/hr):")
-        for cat_a, cat_b in pairs:
-            a = df[df["category"] == cat_a]
-            b = df[df["category"] == cat_b]
-            for metric in ("in_degree", "out_degree"):
-                if len(a[metric]) < 2 or len(b[metric]) < 2:
-                    continue
-                _, p = mannwhitneyu(a[metric], b[metric], alternative="two-sided")
-                med_a = a[metric].median()
-                med_b = b[metric].median()
-                sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
-                print(f"  {metric}: {cat_a} (med={med_a:.1f}) vs {cat_b} (med={med_b:.1f})"
-                      f"  p={p:.2e} {sig}")
-                stat_rows.append({
-                    "dose": d, "metric": metric,
-                    "cat_a": cat_a, "cat_b": cat_b,
-                    "median_a": med_a, "median_b": med_b,
-                    "p_value": p, "sig": sig,
-                })
-
-    stat_df = pd.DataFrame(stat_rows)
-    stat_df.to_csv(f"{output_dir}/hk_structural_scatter_stats.csv", index=False)
-    print(f"\nStats saved: {output_dir}/hk_structural_scatter_stats.csv")
-
-    # Permutation test: are the observed degree separations stronger than
-    # expected from a random gene set of the same size as the HK set?
-    N_PERM = 100
-    # Test the two clearest signals: out-degree Non-ancestor vs HK ancestor,
-    # and in-degree HK ancestor vs HK gene
-    perm_keys = [
-        ("Non-ancestor", "HK ancestor", "out_degree"),
-        ("HK ancestor",  "HK gene",     "in_degree"),
-    ]
-    perm_rows = []
-    print(f"\n=== Permutation Test (N={N_PERM}, random HK label shuffles) ===")
-
-    n_doses_perm = len(dose_dfs)
-    fig_perm, axes_perm = plt.subplots(
-        len(perm_keys), n_doses_perm,
-        figsize=(3.5 * n_doses_perm, 3.5 * len(perm_keys)),
-        sharey="row",
-    )
-    if n_doses_perm == 1:
-        axes_perm = axes_perm.reshape(-1, 1)
-
-    for col, d in enumerate(DOSE_RATES_SORTED):
-        if d not in dose_dfs:
-            continue
-        G = dose_graphs[d]
-        gene_nodes = dose_gene_nodes[d]
-        df = dose_dfs[d]
-        n_hk = len(df[df["category"] == "HK gene"])
-
-        # Observed U-statistics
-        obs_u = {}
-        for cat_a, cat_b, metric in perm_keys:
-            a = df[df["category"] == cat_a][metric].values
-            b = df[df["category"] == cat_b][metric].values
-            if len(a) >= 2 and len(b) >= 2:
-                u, _ = mannwhitneyu(b, a, alternative="greater")
-                obs_u[(cat_a, cat_b, metric)] = u
-
-        # Null distribution via label permutation
-        null_u = {k: [] for k in obs_u}
-        for _ in range(N_PERM):
-            pseudo_hk = set(np.random.choice(gene_nodes, size=n_hk, replace=False))
-            pseudo_anc = set()
-            for node in pseudo_hk:
-                pseudo_anc.update(nx.ancestors(G, node))
-            pseudo_anc -= pseudo_hk
-
-            perm_records = []
-            for n in gene_nodes:
-                if n in pseudo_hk:
-                    pcat = "HK gene"
-                elif n in pseudo_anc:
-                    pcat = "HK ancestor"
-                else:
-                    pcat = "Non-ancestor"
-                perm_records.append({
-                    "in_degree":  G.in_degree(n),
-                    "out_degree": G.out_degree(n),
-                    "category":   pcat,
-                })
-            df_perm = pd.DataFrame(perm_records)
-
-            for cat_a, cat_b, metric in obs_u:
-                a = df_perm[df_perm["category"] == cat_a][metric].values
-                b = df_perm[df_perm["category"] == cat_b][metric].values
-                if len(a) >= 2 and len(b) >= 2:
-                    u, _ = mannwhitneyu(b, a, alternative="greater")
-                    null_u[(cat_a, cat_b, metric)].append(u)
-
-        print(f"\nDose {d} ({DOSE_RATES_ACTUAL[d]} mGy/hr):")
-        for row_idx, (cat_a, cat_b, metric) in enumerate(perm_keys):
-            ax = axes_perm[row_idx][col]
-            key = (cat_a, cat_b, metric)
-            if key not in obs_u or not null_u[key]:
-                ax.set_visible(False)
-                continue
-
-            null = np.array(null_u[key])
-            obs  = obs_u[key]
-            emp_p = np.mean(null >= obs)
-
-            ax.hist(null, bins=20, color="#BAB0AC", edgecolor="white", label="Null")
-            ax.axvline(obs, color="#E15759", linewidth=2, label=f"Observed\np={emp_p:.3f}")
-            ax.legend(fontsize=_fs_tick - 1)
-            ax.tick_params(labelsize=_fs_tick)
-            if row_idx == 0:
-                ax.set_title(f"{DOSE_RATES_ACTUAL[d]} mGy/hr", fontsize=_fs_leg_title,
-                             fontweight="bold")
-            if col == 0:
-                ax.set_ylabel(f"{metric}\n{cat_b} > {cat_a}\nU-statistic", fontsize=_fs_axis)
-            if row_idx == len(perm_keys) - 1:
-                ax.set_xlabel("U-statistic (null)", fontsize=_fs_axis)
-
-            sig = "***" if emp_p < 0.001 else "**" if emp_p < 0.01 else "*" if emp_p < 0.05 else "ns"
-            print(f"  {metric} {cat_b} > {cat_a}: obs_U={obs:.0f}, "
-                  f"null_mean={null.mean():.0f} ± {null.std():.0f}, "
-                  f"emp_p={emp_p:.3f} {sig}")
-            perm_rows.append({
-                "dose": d, "metric": metric, "cat_a": cat_a, "cat_b": cat_b,
-                "obs_U": obs, "null_mean": null.mean(), "null_std": null.std(),
-                "emp_p": emp_p, "sig": sig,
-            })
-
-    fig_perm.suptitle(
-        f"Permutation Test: Observed U-statistic vs Null (N={N_PERM} random HK label shuffles)",
-        fontsize=_fs_title, fontweight="bold",
-    )
-    fig_perm.tight_layout(rect=[0, 0, 1, 0.96])
-    _save_kw = dict(bbox_inches="tight", pad_inches=0.2)
-    plt.savefig(f"{output_dir}/hk_structural_scatter_permutation.png", dpi=300, **_save_kw)
-    plt.savefig(f"{output_dir}/hk_structural_scatter_permutation.svg", dpi=300, **_save_kw)
-    plt.close()
-
-    perm_df = pd.DataFrame(perm_rows)
-    perm_df.to_csv(f"{output_dir}/hk_structural_scatter_permutation.csv", index=False)
-    print(f"\nPermutation results saved: {output_dir}/hk_structural_scatter_permutation.csv")
-
-    fig, axes = plt.subplots(n_cats, n_doses,
-                             figsize=(3.5 * n_doses, 3.5 * n_cats),
-                             sharex=True, sharey=True)
-
-    for row, cat in enumerate(category_order):
-        color = category_colors[cat]
-        ec = color if cat == "Non-ancestor" else "none"
-        props = category_props[cat]
-
-        for col, d in enumerate(DOSE_RATES_SORTED):
-            ax = axes[row][col]
-            if d not in dose_dfs:
-                ax.set_visible(False)
-                continue
-
-            sub = dose_dfs[d][dose_dfs[d]["category"] == cat]
-            ax.scatter(sub["in_degree"], sub["out_degree"],
-                       c=color, edgecolors=ec, **props)
-
-            ax.set_xlim(0, x_max)
-            ax.set_ylim(0, y_max)
-            ax.tick_params(labelsize=_fs_tick)
-
-            n = len(sub)
-            med_in  = sub["in_degree"].median()
-            med_out = sub["out_degree"].median()
-
-            if row == 0:
-                ax.set_title(f"{DOSE_RATES_ACTUAL[d]} mGy/hr", fontsize=_fs_leg_title,
-                             fontweight="bold")
-            if col == 0:
-                ax.set_ylabel(f"{cat}\nOut-degree", fontsize=_fs_axis,
-                              color=color, fontweight="bold")
-            if row == n_cats - 1:
-                ax.set_xlabel("In-degree", fontsize=_fs_axis)
-
-            ax.text(0.97, 0.97, f"n={n}\nmed in={med_in:.0f}, out={med_out:.0f}",
-                    transform=ax.transAxes, ha="right", va="top",
-                    fontsize=_fs_tick - 1, color="gray")
-
-    fig.suptitle("Structural Position by Housekeeping Ancestry (in-degree vs out-degree)",
-                 fontsize=_fs_title, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    _save_kw = dict(bbox_inches="tight", pad_inches=0.2)
-    plt.savefig(f"{output_dir}/hk_structural_scatter.png", dpi=300, **_save_kw)
-    plt.savefig(f"{output_dir}/hk_structural_scatter.svg", dpi=300, **_save_kw)
-    plt.close()
-    print(f"Scatter saved: {output_dir}/hk_structural_scatter.png")
-
-
-def housekeeping_direct_regulator_enrichment(output_dir=".",
-                                              graph_pattern="invariant_subgraph_{d}_annotated.gexf",
-                                              min_hk_targets=2,
-                                              n_perm=20):
-    """Pathway enrichment on direct regulators of HK genes, validated by permutation.
-
-    1. Finds genes that directly precede >= min_hk_targets HK genes per dose.
-    2. Runs gProfiler on these direct regulators.
-    3. For each enriched pathway, computes empirical p: fraction of n_perm
-       random-set predecessor runs where the same pathway appeared at p<0.05.
-       Pathways with emp_p < 0.05 are HK-specific (green bars in plot).
-    """
-    subgraph_dir = os.path.join(output_dir, "..", "structure_analysis")
-
-    hk_path = "/homes/shahashka/lucid_cd/data/prior_knowledge/HSIAO_HOUSEKEEPING_GENES.v2026.1.Hs.json"
-    with open(hk_path, "r") as f:
-        hk_data = json.load(f)
-    hk_genes = set(hk_data["HSIAO_HOUSEKEEPING_GENES"]["geneSymbols"])
-
-    tpm_df = pd.read_csv(
-        "/homes/shahashka/lucid_cd/data/rpe1_experiment2/cd_tpm_matrix_combined_dose_rate.csv",
-        header=0, nrows=0,
-    )
-    background_genes = [c for c in tpm_df.columns if c not in ("dose_rate", "week")]
-
-    EXCLUDE = {"radiation", "dose_rate", "week"}
-    n_doses = len(DOSE_RATES_SORTED)
-    fig, axes = plt.subplots(1, n_doses, figsize=(5 * n_doses, 8), sharey=False)
-    all_rows = []
-
-    for col, d in enumerate(DOSE_RATES_SORTED):
-        ax = axes[col]
-        sub_path = os.path.join(subgraph_dir, graph_pattern.format(d=d))
-        if not os.path.exists(sub_path):
-            ax.set_visible(False)
-            continue
-
-        G = nx.read_gexf(sub_path)
-        gene_nodes = [n for n in G.nodes() if n not in EXCLUDE]
-        hk_in_graph = set(n for n in gene_nodes if n in hk_genes)
-        n_hk = len(hk_in_graph)
-
-        # Count HK targets per direct predecessor
-        hk_target_count = {}
-        for hk_node in hk_in_graph:
-            for pred in G.predecessors(hk_node):
-                if pred not in EXCLUDE and pred not in hk_in_graph:
-                    hk_target_count[pred] = hk_target_count.get(pred, 0) + 1
-
-        direct_regulators = [g for g, cnt in hk_target_count.items()
-                             if cnt >= min_hk_targets]
-        print(f"Dose {d}: {n_hk} HK genes, "
-              f"{len(hk_target_count)} unique predecessors, "
-              f"{len(direct_regulators)} with >={min_hk_targets} HK targets")
-
-        if len(direct_regulators) < 5:
-            print(f"  Too few regulators, skipping")
-            ax.set_visible(False)
-            continue
-
-        # Observed enrichment
-        pe_obs = pathway_enrichment(direct_regulators, background_genes, None)
-        pe_obs = pe_obs.sort_values("p_value").query("term_size < 300").head(10)
-        if pe_obs.empty:
-            print(f"  No significant pathways")
-            ax.set_visible(False)
-            continue
-        obs_pathways = set(pe_obs["native"].values)
-
-        # Permutation: predecessors of random gene sets of same size
-        perm_hits = {pw: 0 for pw in obs_pathways}
-        for i in range(n_perm):
-            pseudo_hk = set(np.random.choice(gene_nodes, size=n_hk, replace=False))
-            pseudo_targets = {}
-            for node in pseudo_hk:
-                for pred in G.predecessors(node):
-                    if pred not in EXCLUDE and pred not in pseudo_hk:
-                        pseudo_targets[pred] = pseudo_targets.get(pred, 0) + 1
-            pseudo_regs = [g for g, cnt in pseudo_targets.items()
-                           if cnt >= min_hk_targets]
-            if len(pseudo_regs) < 5:
-                continue
-            pe_perm = pathway_enrichment(pseudo_regs, background_genes, None)
-            pe_perm = pe_perm.query("term_size < 300")
-            perm_pw = set(pe_perm["native"].values)
-            for pw in obs_pathways:
-                if pw in perm_pw:
-                    perm_hits[pw] += 1
-            print(f"  perm {i+1}/{n_perm}: {len(pseudo_regs)} regulators, "
-                  f"{len(pe_perm)} pathways")
-
-        emp_p = {pw: perm_hits[pw] / n_perm for pw in obs_pathways}
-
-        # Collect results
-        for _, row in pe_obs.iterrows():
-            pw = row["native"]
-            ep = emp_p.get(pw, 1.0)
-            all_rows.append({
-                "dose": d, "pathway": pw, "name": row["name"],
-                "source": row["source"], "p_value": row["p_value"],
-                "neg_log10_p": -np.log10(row["p_value"]),
-                "emp_p": ep, "hk_specific": ep < 0.05,
-            })
-
-        # Plot
-        labels = [f"{r['name']} \n {r['native']}" for _, r in pe_obs.iterrows()]
-        vals   = [-np.log10(r["p_value"]) for _, r in pe_obs.iterrows()]
-        colors = ["#59A14F" if emp_p.get(r["native"], 1.0) < 0.05 else "#BAB0AC"
-                  for _, r in pe_obs.iterrows()]
-        y = np.arange(len(labels))
-        ax.barh(y, vals, color=colors, edgecolor="white", linewidth=0.4)
-        ax.set_yticks(y)
-        ax.set_yticklabels(labels, fontsize=_fs_tick - 1)
-        ax.invert_yaxis()
-        ax.set_title(f"{DOSE_RATES_ACTUAL[d]} mGy/hr\n({len(direct_regulators)} regulators)",
-                     fontsize=_fs_leg_title, fontweight="bold")
-        ax.set_xlabel(r"$-\log_{10}(p)$", fontsize=_fs_axis)
-        ax.tick_params(axis="x", labelsize=_fs_tick)
-
-        print(f"  Pathways (green=HK-specific emp_p<0.05):")
-        for _, row in pe_obs.iterrows():
-            ep = emp_p.get(row["native"], 1.0)
-            print(f"    {'✓' if ep < 0.05 else '✗'} {row['name']} "
-                  f"(p={row['p_value']:.2e}, emp_p={ep:.2f})")
-
-    from matplotlib.patches import Patch as _Patch
-    legend_elements = [
-        _Patch(facecolor="#59A14F", label=f"HK-specific (emp_p<0.05, N={n_perm} perms)"),
-        _Patch(facecolor="#BAB0AC", label="Not HK-specific"),
-    ]
-    fig.legend(handles=legend_elements, loc="lower center",
-               ncol=2, fontsize=_fs_leg, bbox_to_anchor=(0.5, 0.0))
-    fig.suptitle(
-        f"Pathways Enriched in Direct HK Regulators (>={min_hk_targets} HK targets)\n"
-        f"Green = survives permutation specificity check (N={n_perm})",
-        fontsize=_fs_title, fontweight="bold",
-    )
-    fig.tight_layout(rect=[0, 0.06, 1, 0.95])
-    _save_kw = dict(bbox_inches="tight", pad_inches=0.2)
-    plt.savefig(f"{output_dir}/hk_direct_regulator_enrichment.png", dpi=300, **_save_kw)
-    plt.savefig(f"{output_dir}/hk_direct_regulator_enrichment.svg", dpi=300, **_save_kw)
-    plt.close()
-
-    results_df = pd.DataFrame(all_rows)
-    results_df.to_csv(f"{output_dir}/hk_direct_regulator_enrichment.csv", index=False)
-    print(f"\nResults saved: {output_dir}/hk_direct_regulator_enrichment.csv")
-    print(f"Plot saved: {output_dir}/hk_direct_regulator_enrichment.png")
-    return results_df
-
-
-def housekeeping_non_ancestor_enrichment(output_dir=".",
-                                         graph_pattern="invariant_subgraph_{d}_annotated.gexf",
-                                         n_perm=20):
-    """Pathway enrichment on non-ancestor genes, validated by permutation.
-
-    Non-ancestors have no directed path to any HK gene. Tests whether these
-    genes are enriched for specific pathways relative to non-ancestors of
-    random gene sets of the same size as the HK set.
-    """
-    subgraph_dir = os.path.join(output_dir, "..", "structure_analysis")
-
-    hk_path = "/homes/shahashka/lucid_cd/data/prior_knowledge/HSIAO_HOUSEKEEPING_GENES.v2026.1.Hs.json"
-    with open(hk_path, "r") as f:
-        hk_data = json.load(f)
-    hk_genes = set(hk_data["HSIAO_HOUSEKEEPING_GENES"]["geneSymbols"])
-
-    tpm_df = pd.read_csv(
-        "/homes/shahashka/lucid_cd/data/rpe1_experiment2/cd_tpm_matrix_combined_dose_rate.csv",
-        header=0, nrows=0,
-    )
-    background_genes = [c for c in tpm_df.columns if c not in ("dose_rate", "week")]
-
-    EXCLUDE = {"radiation", "dose_rate", "week"}
-    n_doses = len(DOSE_RATES_SORTED)
-    fig, axes = plt.subplots(1, n_doses, figsize=(5 * n_doses, 8), sharey=False)
-    all_rows = []
-
-    for col, d in enumerate(DOSE_RATES_SORTED):
-        ax = axes[col]
-        sub_path = os.path.join(subgraph_dir, graph_pattern.format(d=d))
-        if not os.path.exists(sub_path):
-            ax.set_visible(False)
-            continue
-
-        G = nx.read_gexf(sub_path)
-        gene_nodes = [n for n in G.nodes() if n not in EXCLUDE]
-        hk_in_graph = set(n for n in gene_nodes if n in hk_genes)
-        n_hk = len(hk_in_graph)
-
-        hk_ancestors = set()
-        for hk_node in hk_in_graph:
-            hk_ancestors.update(nx.ancestors(G, hk_node))
-        hk_ancestors -= hk_in_graph
-
-        non_ancestors = [n for n in gene_nodes
-                         if n not in hk_in_graph and n not in hk_ancestors]
-        print(f"Dose {d}: {n_hk} HK genes, {len(hk_ancestors)} ancestors, "
-              f"{len(non_ancestors)} non-ancestors")
-
-        if len(non_ancestors) < 5:
-            print(f"  Too few non-ancestors, skipping")
-            ax.set_visible(False)
-            continue
-
-        # Observed enrichment on real non-ancestors
-        pe_obs = pathway_enrichment(non_ancestors, background_genes, None)
-        pe_obs = pe_obs.sort_values("p_value").query("term_size < 300").head(10)
-        if pe_obs.empty:
-            print(f"  No significant pathways")
-            ax.set_visible(False)
-            continue
-        obs_pathways = set(pe_obs["native"].values)
-
-        # Permutation: non-ancestors of random gene sets
-        perm_hits = {pw: 0 for pw in obs_pathways}
-        for i in range(n_perm):
-            pseudo_hk = set(np.random.choice(gene_nodes, size=n_hk, replace=False))
-            pseudo_anc = set()
-            for node in pseudo_hk:
-                pseudo_anc.update(nx.ancestors(G, node))
-            pseudo_anc -= pseudo_hk
-            pseudo_non = [n for n in gene_nodes
-                          if n not in pseudo_hk and n not in pseudo_anc]
-            if len(pseudo_non) < 5:
-                continue
-            pe_perm = pathway_enrichment(pseudo_non, background_genes, None)
-            pe_perm = pe_perm.query("term_size < 300")
-            perm_pw = set(pe_perm["native"].values)
-            for pw in obs_pathways:
-                if pw in perm_pw:
-                    perm_hits[pw] += 1
-            print(f"  perm {i+1}/{n_perm}: {len(pseudo_non)} non-ancestors, "
-                  f"{len(pe_perm)} pathways")
-
-        emp_p = {pw: perm_hits[pw] / n_perm for pw in obs_pathways}
-
-        for _, row in pe_obs.iterrows():
-            pw = row["native"]
-            ep = emp_p.get(pw, 1.0)
-            all_rows.append({
-                "dose": d, "pathway": pw, "name": row["name"],
-                "source": row["source"], "p_value": row["p_value"],
-                "neg_log10_p": -np.log10(row["p_value"]),
-                "emp_p": ep, "hk_specific": ep < 0.05,
-            })
-
-        labels = [f"{r['name']} \n {r['native']}" for _, r in pe_obs.iterrows()]
-        vals   = [-np.log10(r["p_value"]) for _, r in pe_obs.iterrows()]
-        colors = ["#4E79A7" if emp_p.get(r["native"], 1.0) < 0.05 else "#BAB0AC"
-                  for _, r in pe_obs.iterrows()]
-        y = np.arange(len(labels))
-        ax.barh(y, vals, color=colors, edgecolor="white", linewidth=0.4)
-        ax.set_yticks(y)
-        ax.set_yticklabels(labels, fontsize=_fs_tick - 1)
-        ax.invert_yaxis()
-        ax.set_title(f"{DOSE_RATES_ACTUAL[d]} mGy/hr\n({len(non_ancestors)} non-ancestors)",
-                     fontsize=_fs_leg_title, fontweight="bold")
-        ax.set_xlabel(r"$-\log_{10}(p)$", fontsize=_fs_axis)
-        ax.tick_params(axis="x", labelsize=_fs_tick)
-
-        print(f"  Pathways (blue=specific to HK non-ancestors, emp_p<0.05):")
-        for _, row in pe_obs.iterrows():
-            ep = emp_p.get(row["native"], 1.0)
-            print(f"    {'✓' if ep < 0.05 else '✗'} {row['name']} "
-                  f"(p={row['p_value']:.2e}, emp_p={ep:.2f})")
-
-    from matplotlib.patches import Patch as _Patch
-    legend_elements = [
-        _Patch(facecolor="#4E79A7", label=f"Specific to HK non-ancestors (emp_p<0.05, N={n_perm})"),
-        _Patch(facecolor="#BAB0AC", label="Also appears in random non-ancestors"),
-    ]
-    fig.legend(handles=legend_elements, loc="lower center",
-               ncol=2, fontsize=_fs_leg, bbox_to_anchor=(0.5, 0.0))
-    fig.suptitle(
-        "Pathway Enrichment of Non-Ancestors (no path to any HK gene)\n"
-        f"Blue = survives permutation specificity check (N={n_perm})",
-        fontsize=_fs_title, fontweight="bold",
-    )
-    fig.tight_layout(rect=[0, 0.06, 1, 0.95])
-    _save_kw = dict(bbox_inches="tight", pad_inches=0.2)
-    plt.savefig(f"{output_dir}/hk_non_ancestor_enrichment.png", dpi=300, **_save_kw)
-    plt.savefig(f"{output_dir}/hk_non_ancestor_enrichment.svg", dpi=300, **_save_kw)
-    plt.close()
-
-    results_df = pd.DataFrame(all_rows)
-    results_df.to_csv(f"{output_dir}/hk_non_ancestor_enrichment.csv", index=False)
-    print(f"\nResults saved: {output_dir}/hk_non_ancestor_enrichment.csv")
-    print(f"Plot saved: {output_dir}/hk_non_ancestor_enrichment.png")
-    return results_df
-
 
 def main():
     parser = argparse.ArgumentParser(description="Pathway enrichment analysis")
@@ -2116,30 +1382,23 @@ def main():
                         help="Output directory for figures (default: ./pathway_enrichment)")
     args = parser.parse_args()
     out_dir = args.output_dir
-    
     os.makedirs(out_dir, exist_ok=True)
-
-    housekeeping_parent_enrichment(output_dir=out_dir)
-    housekeeping_structural_scatter(output_dir=out_dir)
-    housekeeping_direct_regulator_enrichment(output_dir=out_dir, n_perm=100)
-    housekeeping_non_ancestor_enrichment(output_dir=out_dir, n_perm=100)
-
-    tpm_df, log2fold_df, graphs_genes_by_dose, genes_by_dose, genes_neighborhoods, genes_100_tfs = load_data()
+    tpm_df, _, graphs_genes_by_dose, genes_by_dose, genes_neighborhoods, genes_100_tfs = load_data()
     background_genes = list(set(tpm_df["Gene"]))
+    
+    
     # random_gene_sanity_check(background_genes, graphs_genes_by_dose,
     #                          n_random=5, output_dir=out_dir)
-
-
     de_gene_intersection = set.intersection(*[set(genes) for genes in genes_by_dose.values()])
     causal_gene_intersection = set.intersection(*[set(genes) for genes in graphs_genes_by_dose.values()])
     invariant_plots(out_dir, causal_gene_intersection, de_gene_intersection,
                              background_genes)
+    housekeeping_parent_enrichment(output_dir=out_dir)
 
-    # CORR FEATURES
+    # CORRELATIVE FEATURES
     threshold=0.5
     corr_features = pd.read_csv(CORR_GENES_PATH, header=0)
     corr_genes = corr_features.loc[corr_features["fold_fraction"]>=threshold]["gene"].values
-    print(len(corr_genes))
     corr_check = pathway_enrichment(corr_genes, background_genes, None)
     radiation_corr = {"pathways": ALL_RADIATION_PATHWAY_IDS}
     radiation_corr['logp_values'] = _build_radiation_logp(corr_check)
@@ -2151,12 +1410,11 @@ def main():
         "sources": pe_corr.iloc[0:10]['source'].values,
         "neg_log10_p": -np.log10(pe_corr.iloc[0:10]['p_value'].values),
     }
-    print(top_data_corr)
-    create_latex_table(pe_corr.iloc[0:10], "./pathway_enrichment", fname="top10_corr.csv", name='Corr.')
+    create_latex_table(pe_corr.iloc[0:10], args.output_dir, fname="top10_corr.csv", name='Corr.')
 
     # RANDOM FOREST FEATURES 
     threshold=0.5
-    rf_features = pd.read_csv("./nested_cv_results_phenotype_refactored/stable_features_rf.csv", header=0)
+    rf_features = pd.read_csv(RF_GENES_PATH, header=0)
     rf_genes = rf_features.loc[rf_features["fold_fraction"]>=threshold]["gene"].values
     rf_check = pathway_enrichment(rf_genes, background_genes, None)
     radiation_rf = {"pathways": ALL_RADIATION_PATHWAY_IDS}
@@ -2169,40 +1427,19 @@ def main():
         "sources": pe.iloc[0:10]['source'].values,
         "neg_log10_p": -np.log10(pe.iloc[0:10]['p_value'].values),
     }
-    print(rf_check, radiation_rf['logp_values'] )
-    print(top_data_rf)
     create_latex_table(pe.iloc[0:10], "./pathway_enrichment", fname="top10_rf.csv", name='Corr.')
 
-
-    # LOAD PERFECT BOOTSTRAP GENES PER DOSE RATE
-    perfect_genes_by_dose = {}
-    for d in DOSE_RATES:
-        path = os.path.join("structure_analysis", f"perfect_genes_{d}.pkl")
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                perfect_genes_by_dose[d] = pickle.load(f)
-            print(f"Perfect bootstrap genes {d}: {len(perfect_genes_by_dose[d])} genes")
-
     # RUN PATHWAY ENRICHMENT FOR EACH DOSE RATE
-    all_causal = [pathway_enrichment(graphs_genes_by_dose[d], background_genes, None) for d in DOSE_RATES]
-    all_de = [pathway_enrichment(genes_by_dose[d], background_genes, None) for d in DOSE_RATES]
-    all_causal_neighborhoods = [pathway_enrichment(genes_neighborhoods[d], background_genes, None) for d in DOSE_RATES]
-    all_perfect = {d: pathway_enrichment(perfect_genes_by_dose[d], background_genes, None)
-                   for d in DOSE_RATES if d in perfect_genes_by_dose}
+    all_causal = [pathway_enrichment(graphs_genes_by_dose[d], background_genes, None) for d in DOSE_RATE_LABELS]
+    all_de = [pathway_enrichment(genes_by_dose[d], background_genes, None) for d in DOSE_RATE_LABELS]
 
+    # RADIATION SPECIFIC BAR PLOTS 
     radiation_data_causal = {"pathways": ALL_RADIATION_PATHWAY_IDS}
     radiation_data_de = {"pathways": ALL_RADIATION_PATHWAY_IDS}
-    radiation_data_neighborhoods = {"pathways": ALL_RADIATION_PATHWAY_IDS}
-    radiation_data_perfect = {"pathways": ALL_RADIATION_PATHWAY_IDS}
 
-    for i, d in enumerate(DOSE_RATES):
-        radiation_data_causal[DOSE_RATES_ACTUAL[d]] = _build_radiation_logp(all_causal[i])
-        radiation_data_de[DOSE_RATES_ACTUAL[d]] = _build_radiation_logp(all_de[i])
-        radiation_data_neighborhoods[DOSE_RATES_ACTUAL[d]] = _build_radiation_logp(all_causal_neighborhoods[i])
-        if d in all_perfect:
-            radiation_data_perfect[DOSE_RATES_ACTUAL[d]] = _build_radiation_logp(all_perfect[d])
-
-    # BAR PLOTS
+    for i, d in enumerate(DOSE_RATE_LABELS):
+        radiation_data_causal[DOSE_RATES_REGRESSION[d]] = _build_radiation_logp(all_causal[i])
+        radiation_data_de[DOSE_RATES_REGRESSION[d]] = _build_radiation_logp(all_de[i])
     generate_plots(
         {
             "Differential Expression": radiation_data_de,
@@ -2212,19 +1449,10 @@ def main():
         output_dir=out_dir,
     )
 
-    generate_plots(
-        {
-            "Perfect Bootstrap": radiation_data_perfect,
-        },
-        filename="radiation_pathway_enrichment_perfect",
-        output_dir=out_dir,
-    )
-
     # TOP ENRICHED PATHWAYS FOR EACH METHOD
     top_data_causal = {}
     top_data_de = {}
-    top_data_perfect = {}
-    for i, d in enumerate(DOSE_RATES):
+    for i, d in enumerate(DOSE_RATE_LABELS):
         pe_causal = all_causal[i].sort_values(by='p_value', ascending=True).query('term_size < 300')
         pe_de = all_de[i].sort_values(by='p_value', ascending=True).query('term_size < 300')
 
@@ -2242,95 +1470,12 @@ def main():
             "neg_log10_p": -np.log10(pe_de.iloc[0:10]['p_value'].values),
         }
 
-        if d in all_perfect:
-            pe_perf = all_perfect[d].sort_values(by='p_value', ascending=True).query('term_size < 300')
-            top_data_perfect[d] = {
-                "pathways": pe_perf.iloc[0:10]['native'].values,
-                "names": pe_perf.iloc[0:10]['name'].values,
-                "sources": pe_perf.iloc[0:10]['source'].values,
-                "neg_log10_p": -np.log10(pe_perf.iloc[0:10]['p_value'].values),
-            }
-
     generate_top_plots({
             "Differential Expression": top_data_de,
             "Causal Graph": top_data_causal,
         },
         agnostic_datasets={"Supervised ML (Random Forest)": top_data_rf, "Correlation (Linear Regression)":top_data_corr},
         output_dir=out_dir)
-
-    # generate_top_plots({
-    #         "Perfect Bootstrap": top_data_perfect,
-    #     },
-    #     filename="top10_pathway_enrichment_perfect",
-    #     output_dir=out_dir)
-
-    # # PATHWAY ENRICHMENT FOR INTERSECTION OF DE AND CAUSAL GENES
-    # intersection_genes_by_dose = {}
-    # for d in DOSE_RATES:
-    #     intersection_genes_by_dose[d] = list(
-    #         set(graphs_genes_by_dose[d]) & set(genes_by_dose[d])
-    #     )
-    # all_intersection = [
-    #     pathway_enrichment(intersection_genes_by_dose[d], background_genes, None)
-    #     for d in DOSE_RATES
-    # ]
-    # top_data_intersection = {}
-    # for i, d in enumerate(DOSE_RATES):
-    #     pe = all_intersection[i].sort_values(by='p_value', ascending=True).query('term_size < 300')
-    #     top_data_intersection[d] = {
-    #         "pathways": pe.iloc[0:10]['native'].values,
-    #         "names": pe.iloc[0:10]['name'].values,
-    #         "sources": pe.iloc[0:10]['source'].values,
-    #         "neg_log10_p": -np.log10(pe.iloc[0:10]['p_value'].values),
-    #     }
-
-    # generate_top_plots(
-    #     {
-    #         "Differential Expression": top_data_de,
-    #         "Causal Graph": top_data_causal,
-    #         "Intersection (DE ∩ Causal)": top_data_intersection,
-    #     },
-    #     filename="top10_pathway_enrichment_with_intersection",
-    #     output_dir=out_dir,
-    # )
-
-    # # PATHWAY ENRICHMENT FOR GENES SHARED ACROSS ALL DOSE RATES (per method)
-    # causal_intersection = set(graphs_genes_by_dose[DOSE_RATES[0]])
-    # de_intersection = set(genes_by_dose[DOSE_RATES[0]])
-    # for d in DOSE_RATES[1:]:
-    #     causal_intersection &= set(graphs_genes_by_dose[d])
-    #     de_intersection &= set(genes_by_dose[d])
-
-    # pe_causal_shared = pathway_enrichment(
-    #     list(causal_intersection), background_genes, None
-    # ).sort_values(by='p_value', ascending=True).query('term_size < 300')
-    # pe_de_shared = pathway_enrichment(
-    #     list(de_intersection), background_genes, None
-    # ).sort_values(by='p_value', ascending=True).query('term_size < 300')
-
-    # shared_key = "shared"
-    # top_shared_causal = {shared_key: {
-    #     "pathways": pe_causal_shared.iloc[0:10]['native'].values,
-    #     "names": pe_causal_shared.iloc[0:10]['name'].values,
-    #     "sources": pe_causal_shared.iloc[0:10]['source'].values,
-    #     "neg_log10_p": -np.log10(pe_causal_shared.iloc[0:10]['p_value'].values),
-    # }}
-    # top_shared_de = {shared_key: {
-    #     "pathways": pe_de_shared.iloc[0:10]['native'].values,
-    #     "names": pe_de_shared.iloc[0:10]['name'].values,
-    #     "sources": pe_de_shared.iloc[0:10]['source'].values,
-    #     "neg_log10_p": -np.log10(pe_de_shared.iloc[0:10]['p_value'].values),
-    # }}
-
-    # generate_top_plots(
-    #     {
-    #         "Causal Graph": top_shared_causal,
-    #         "Differential Expression": top_shared_de,
-    #     },
-    #     filename="top10_shared_across_doses",
-    #     output_dir=out_dir,
-    # )
-
     venn_diagrams(graphs_genes_by_dose, genes_by_dose, rf_genes=rf_genes, corr_genes=corr_genes, output_dir=out_dir)
 
 

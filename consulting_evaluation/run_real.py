@@ -10,7 +10,7 @@ sys.path.insert(0, "..")
 from real_data import load_data_lfc, load_data_tpm
 from pipeline import PipelineConfig, run_pipeline
 from pathway_enrichment import pathway_enrichment
-from plot_settings import _fs_axis, _fs_title, _DEFAULT_CMAPS
+from global_variables import _fs_axis, _fs_title, _DEFAULT_CMAPS
 
 
 def plot_factor_enrichment(pe_results, output_path="factor_pathway_enrichment.png"):

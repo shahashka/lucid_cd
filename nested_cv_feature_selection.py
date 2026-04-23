@@ -32,7 +32,7 @@ from feature_selection import (
     random_forest_features,
     deg_features,
     top_multiple_correlation,
-    CAUSAL_DOSE_RATES,
+    DOSE_RATE_LABELS,
     GRAPHS,
 )
 
@@ -68,7 +68,7 @@ def build_feature_sets(X, y_dr_reg, y_w):
     feature_sets["variance"] = variance_thresholding(X)
     
     # Causal features per dose rate
-    for dr in CAUSAL_DOSE_RATES:
+    for dr in DOSE_RATE_LABELS:
         feature_sets[f"causal_{dr}"] = causal_features(dr, tf=False)
         feature_sets[f"causal_tf_{dr}"] = causal_features(dr, tf=True)
     feature_sets["causal_dose_rate"] = causal_features("all_doses_dose_rate", tf=False)
@@ -98,7 +98,7 @@ def build_feature_sets(X, y_dr_reg, y_w):
     feature_sets['housekeeping_genes'] = housekeeping_invariant_features()
 
     # Perfect bootstrap edge genes (100% bootstrap frequency, per dose)
-    for dr in CAUSAL_DOSE_RATES:
+    for dr in DOSE_RATE_LABELS:
         perfect_path = os.path.join("structure_analysis", f"perfect_genes_{dr}.pkl")
         if os.path.exists(perfect_path):
             with open(perfect_path, "rb") as f:
