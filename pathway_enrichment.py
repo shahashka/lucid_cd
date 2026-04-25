@@ -175,7 +175,27 @@ def load_data():
     genes_neighborhoods['all_doses_week'] = pd.read_csv(f"{INVARIANT_GRAPHS}/week_sub_dag_gnn_combined_ranked.csv", header=0).iloc[:,0].to_list()
     
     return tpm_df, log2fold_df, graphs_genes_by_dose, genes_by_dose, genes_neighborhoods, genes_100_tfs
-
+def profile_safe(gp, genes, background, **kwargs):
+      """Recursively drop unrecognised genes until the query succeeds."""
+      if not genes:
+          return None
+      try:
+          return gp.profile(organism="hsapiens", query=genes,
+                            background=background, **kwargs)
+      except AssertionError:
+          if len(genes) == 1:
+              print(f"Dropping unrecognised gene: {genes[0]}")
+              return None
+          mid = len(genes) // 2
+          left  = profile_safe(gp, genes[:mid], background, **kwargs)
+          right = profile_safe(gp, genes[mid:], background, **kwargs)
+          if left is None and right is None:
+              return None
+          if left is None:  return right
+          if right is None: return left
+          import pandas as pd
+          return pd.concat([left, right]).drop_duplicates()
+      
 def pathway_enrichment(genes,background_genes, pathways) -> pd.DataFrame:
     """Given a list of genes, perform pathway enrichment using knowledge databases
 
@@ -186,7 +206,11 @@ def pathway_enrichment(genes,background_genes, pathways) -> pd.DataFrame:
         (List[Any]): Return a list of named pathways and scores for each 
     """
     print('call gprofiler')
-    gp = GProfiler(return_dataframe=True, base_url="https://biit.cs.ut.ee/gprofiler_archive3/e113_eg59_p19/")
+    # This is the version of gprofiler that was used to generated plots in the paper (since archived)
+    # -> base_url="https://biit.cs.ut.ee/gprofiler_archive3/e113_eg59_p19/")
+    # for some reason hangs on our gene set...so just using current version 
+    gp = GProfiler(return_dataframe=True)
+    profile_safe(gp, list(set(genes)), background_genes)
     results = gp.profile(
         organism="hsapiens",
         query=list(set(genes)),

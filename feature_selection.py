@@ -32,8 +32,6 @@ def deg_features():
 
 def load_data_tpm():
     df = pd.read_csv("/homes/shahashka/lucid_cd/data/rpe1_experiment2/cd_tpm_matrix_combined_dose_rate.csv", header=0)
-    dose_rate = np.array([0.4 if (d==0.004) or (d==0.04) else d for d in df['dose_rate'] ])
-    labels_dr = OrdinalEncoder().fit_transform(dose_rate.reshape(-1,1))
     labels_w = df['week']
 
     # Build labels_dr_regression: map raw dose_rate values to letters via DOSE_RATES, then to regression values
@@ -85,11 +83,11 @@ def load_data_tpm():
     phenotypes = phenotypes.reset_index()
     phenotypes = phenotypes.drop(columns=["week_num", "dose_label"])
 
-    return X, labels_dr, labels_dr_regression, labels_w, phenotypes
+    return X, labels_dr_regression, labels_w, phenotypes
 
 def load_data(args):
     log2fold_df = pd.read_csv(f"/homes/shahashka/lucid_cd/data/rpe1_experiment2/rpe1_9week_study_experiment2_diffexp_deseq_vs_control_all_dG_W2_adjust.txt", sep="\t")
-    if args.prune_log2fold:
+    if args and args.prune_log2fold:
         print("Pruning log2fold data")
         log2fold_df = log2fold_df.loc[log2fold_df['padj'] < 0.05] # This is new, I think I should filter by p value. However this means there are no genes that DE across all dose rates
         log2fold_df = log2fold_df.loc[abs(log2fold_df['log2FoldChange']) > 1]
@@ -100,7 +98,7 @@ def load_data(args):
     
     labels_dr_regression = np.array([DOSE_RATES_REGRESSION[d[1]] for d in log2fold_df['dose_rate']])
     log2fold_df['week'] = [float(w[1]) for w in log2fold_df['week']]
-    if args.prune_log2fold:
+    if args and args.prune_log2fold:
         log2fold_df_na = log2fold_df.fillna(0) # if we drop na after pruning, we are left with no genes that overlap conditions
     else:
         log2fold_df_na = log2fold_df.dropna(axis=1) # identify genes that are differenitlaly expressed across dose rates while ignoring significance
