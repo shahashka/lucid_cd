@@ -1,7 +1,7 @@
 
 ## Project Overview
 
-**lucid_cd** is a computational biology research project for causal discovery and feature selection in radiation biology. It infers and analyzes gene regulatory networks in RPE1 cells exposed to ionizing radiation across 5 dose rates over 9 weeks.
+**lucid_cd** is a computational biology research project for causal discovery and feature selection in radiation biology. We infer and analyzes gene regulatory networks in RPE1 cells exposed to ionizing radiation across 5 dose rates over 9 weeks.
 
 ## Data 
 - Gene expression data is in TPM (transcripts per million) stored in `data/rpe_experiment2/rpe1_9week_study_experiment2_all_tpm.tsv`.
